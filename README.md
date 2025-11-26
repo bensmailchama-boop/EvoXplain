@@ -13,7 +13,7 @@ fingerprints, and tracks:
 The core design is deliberately **pipeline-agnostic**:
 
 - EvoXplain can sit at the **end** of an omics pipeline (for example, after a
-  tool like PredictMix or any ensemble learner), consuming model snapshots and
+  tool ensemble learner), consuming model snapshots and
   returning evolutionary explainability metrics.
 - The same engine can be applied to other domains such as housing prices,
   credit scoring, insurance risk, or any predictive system that is retrained
