@@ -1,0 +1,227 @@
+{
+  "100": {
+    "k": 2,
+    "entropy_norm": 0.9924820324406042,
+    "silhouette_scores": {
+      "2": 0.5019045851559844,
+      "3": 0.39878855195981294,
+      "4": 0.38697009497947166,
+      "5": 0.33686244906086776,
+      "6": 0.3375417903677336,
+      "7": 0.3446114514945652,
+      "8": 0.2983760209012853
+    },
+    "n_runs": 1000,
+    "n_test": 171,
+    "max_disagreement": 0.4341366450878119,
+    "mean_disagreement": 0.07687310921827638,
+    "median_disagreement": 0.06552060373008217,
+    "n_disagree_gt_0.1": 20,
+    "n_disagree_gt_0.2": 7,
+    "n_disagree_gt_0.3": 5,
+    "representatives": [
+      {
+        "cluster_id": 0,
+        "run_idx": "555",
+        "run_id": 555,
+        "acc": 0.9239766081871345,
+        "rf_n_estimators": 314.0,
+        "rf_max_depth": 1.0,
+        "rf_max_features": 0.5269670466510791,
+        "rf_min_samples_split": 13.0,
+        "rf_min_samples_leaf": 8.0
+      },
+      {
+        "cluster_id": 1,
+        "run_idx": "141",
+        "run_id": 141,
+        "acc": 0.9649122807017544,
+        "rf_n_estimators": 296.0,
+        "rf_max_depth": 30.0,
+        "rf_max_features": 0.6797616103811395,
+        "rf_min_samples_split": 20.0,
+        "rf_min_samples_leaf": 8.0
+      }
+    ]
+  },
+  "101": {
+    "k": 2,
+    "entropy_norm": 0.9958294764724046,
+    "silhouette_scores": {
+      "2": 0.469667819027336,
+      "3": 0.3902260156558849,
+      "4": 0.3047588629557843,
+      "5": 0.3015674276996226,
+      "6": 0.2875800660732233,
+      "7": 0.2977622454784437,
+      "8": 0.2535415653934263
+    },
+    "n_runs": 1000,
+    "n_test": 171,
+    "max_disagreement": 0.13091860735862695,
+    "mean_disagreement": 0.01928718593909447,
+    "median_disagreement": 0.01405793872480754,
+    "n_disagree_gt_0.1": 2,
+    "n_disagree_gt_0.2": 0,
+    "n_disagree_gt_0.3": 0,
+    "representatives": [
+      {
+        "cluster_id": 0,
+        "run_idx": "915",
+        "run_id": 915,
+        "acc": 0.9707602339181286,
+        "rf_n_estimators": 461.0,
+        "rf_max_depth": 25.0,
+        "rf_max_features": 0.8630302996543755,
+        "rf_min_samples_split": 13.0,
+        "rf_min_samples_leaf": 5.0
+      },
+      {
+        "cluster_id": 1,
+        "run_idx": "931",
+        "run_id": 931,
+        "acc": 0.9590643274853801,
+        "rf_n_estimators": 269.0,
+        "rf_max_depth": 3.0,
+        "rf_max_features": 0.36700093450646093,
+        "rf_min_samples_split": 8.0,
+        "rf_min_samples_leaf": 3.0
+      }
+    ]
+  },
+  "102": {
+    "k": 2,
+    "entropy_norm": 0.9999971146079947,
+    "silhouette_scores": {
+      "2": 0.6237912437008529,
+      "3": 0.556320917893418,
+      "4": 0.45447501579520166,
+      "5": 0.44767441463657354,
+      "6": 0.3073749153579983,
+      "7": 0.3171787109926862,
+      "8": 0.278014644574337
+    },
+    "n_runs": 1000,
+    "n_test": 171,
+    "max_disagreement": 0.16206339239935064,
+    "mean_disagreement": 0.01647282815150685,
+    "median_disagreement": 0.004071035409876633,
+    "n_disagree_gt_0.1": 4,
+    "n_disagree_gt_0.2": 0,
+    "n_disagree_gt_0.3": 0,
+    "representatives": [
+      {
+        "cluster_id": 0,
+        "run_idx": "553",
+        "run_id": 553,
+        "acc": 0.9532163742690059,
+        "rf_n_estimators": 56.0,
+        "rf_max_depth": 8.0,
+        "rf_max_features": 0.6111657421908949,
+        "rf_min_samples_split": 14.0,
+        "rf_min_samples_leaf": 2.0
+      },
+      {
+        "cluster_id": 1,
+        "run_idx": "399",
+        "run_id": 399,
+        "acc": 0.9532163742690059,
+        "rf_n_estimators": 509.0,
+        "rf_max_depth": 18.0,
+        "rf_max_features": 0.7892588879756115,
+        "rf_min_samples_split": 19.0,
+        "rf_min_samples_leaf": 1.0
+      }
+    ]
+  },
+  "103": {
+    "k": 2,
+    "entropy_norm": 0.980510717879657,
+    "silhouette_scores": {
+      "2": 0.3661503456082107,
+      "3": 0.3153027278157221,
+      "4": 0.28750574485486585,
+      "5": 0.28014323092788856,
+      "6": 0.2653882925029675,
+      "7": 0.2683037903341029,
+      "8": 0.27314585518330686
+    },
+    "n_runs": 1000,
+    "n_test": 171,
+    "max_disagreement": 0.18006462697330805,
+    "mean_disagreement": 0.026297490099096064,
+    "median_disagreement": 0.008020705475888623,
+    "n_disagree_gt_0.1": 10,
+    "n_disagree_gt_0.2": 0,
+    "n_disagree_gt_0.3": 0,
+    "representatives": [
+      {
+        "cluster_id": 0,
+        "run_idx": "88",
+        "run_id": 88,
+        "acc": 0.9415204678362573,
+        "rf_n_estimators": 166.0,
+        "rf_max_depth": 17.0,
+        "rf_max_features": 0.4671746169591293,
+        "rf_min_samples_split": 16.0,
+        "rf_min_samples_leaf": 10.0
+      },
+      {
+        "cluster_id": 1,
+        "run_idx": "887",
+        "run_id": 887,
+        "acc": 0.9532163742690059,
+        "rf_n_estimators": 521.0,
+        "rf_max_depth": 8.0,
+        "rf_max_features": 0.4318792853144639,
+        "rf_min_samples_split": 3.0,
+        "rf_min_samples_leaf": 4.0
+      }
+    ]
+  },
+  "104": {
+    "k": 2,
+    "entropy_norm": 0.9951442089848421,
+    "silhouette_scores": {
+      "2": 0.5197194542489592,
+      "3": 0.44519564980953724,
+      "4": 0.34417860453595417,
+      "5": 0.3300616704708262,
+      "6": 0.22838099078302104,
+      "7": 0.22574619385124056,
+      "8": 0.2171733339195457
+    },
+    "n_runs": 1000,
+    "n_test": 171,
+    "max_disagreement": 0.07590950305412858,
+    "mean_disagreement": 0.01025990712101843,
+    "median_disagreement": 0.0049402163873459165,
+    "n_disagree_gt_0.1": 0,
+    "n_disagree_gt_0.2": 0,
+    "n_disagree_gt_0.3": 0,
+    "representatives": [
+      {
+        "cluster_id": 0,
+        "run_idx": "579",
+        "run_id": 579,
+        "acc": 0.935672514619883,
+        "rf_n_estimators": 324.0,
+        "rf_max_depth": 16.0,
+        "rf_max_features": 0.6327725103150301,
+        "rf_min_samples_split": 17.0,
+        "rf_min_samples_leaf": 10.0
+      },
+      {
+        "cluster_id": 1,
+        "run_idx": "496",
+        "run_id": 496,
+        "acc": 0.9415204678362573,
+        "rf_n_estimators": 465.0,
+        "rf_max_depth": 17.0,
+        "rf_max_features": 0.3310513031772341,
+        "rf_min_samples_split": 7.0,
+        "rf_min_samples_leaf": 7.0
+      }
+    ]
+  }
+}
