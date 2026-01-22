@@ -2,7 +2,7 @@
 """
 evoxplain_core_engine.py - EvoXplain HPC SHAP Runner + Aggregator
 
-
+FIXED VERSION - All bugs corrected:
 1. SHAP 3D array indexing for TreeExplainer (SHAP 0.42+)
 2. RF hyperparameters saved in aggregate NPZ files  
 3. RF hyperparameters used in disagreement analysis
@@ -377,7 +377,10 @@ def run_chunk(args):
 def aggregate_split(args, split_seed):
     """
     Aggregate all chunks for one split_seed into a single NPZ file.
-    FIX: Now saves RF hyperparameters in the NPZ for disagreement analysis.
+    
+    Now also performs clustering and saves:
+    - best_k, labels, silhouette scores
+    - Clustering decision rationale
     """
     out_dir = Path(args.output_dir)
     metas = []
@@ -410,14 +413,13 @@ def aggregate_split(args, split_seed):
     if "C" in metas[0]:
         c_values = np.array([m.get("C", np.nan) for m in metas], dtype=float)
 
-    # FIX: Save RF hyperparameters if present
+    # RF hyperparameters if present
     rf_params_arrays = {}
     rf_param_keys = ["rf_n_estimators", "rf_max_depth", "rf_max_features", 
                      "rf_min_samples_split", "rf_min_samples_leaf"]
     
     for key in rf_param_keys:
         if key in metas[0]:
-            # Handle None values (e.g., max_depth=None)
             values = []
             for m in metas:
                 val = m.get(key, np.nan)
@@ -426,59 +428,165 @@ def aggregate_split(args, split_seed):
                 values.append(val)
             rf_params_arrays[key] = np.array(values, dtype=float)
 
+    # ==========================================================================
+    # CLUSTERING: Discover mechanistic basins within this split
+    # k=1 is null hypothesis; k>1 requires silhouette > threshold
+    # ==========================================================================
+    
+    # L2 normalize importance vectors (paper methodology)
+    mu = imps.mean(axis=0)
+    centered = imps - mu
+    norms = np.linalg.norm(centered, axis=1, keepdims=True)
+    norms = np.where(norms == 0, 1.0, norms)
+    normed_importance = centered / norms
+    
+    # Perform clustering with k=1 as null hypothesis
+    silhouette_threshold = getattr(args, 'silhouette_threshold', 0.25)
+    best_k, labels, metrics = pick_best_k_kmeans(
+        normed_importance, 
+        k_max=args.k_max, 
+        seed=args.seed,
+        silhouette_threshold=silhouette_threshold
+    )
+    
+    # Compute normalized entropy
+    if best_k > 1:
+        counts = np.array([(labels == i).sum() for i in range(best_k)])
+        probs = counts / counts.sum()
+        probs = probs[probs > 0]
+        entropy = -np.sum(probs * np.log2(probs))
+        entropy_norm = entropy / np.log2(best_k)
+    else:
+        entropy = 0.0
+        entropy_norm = 0.0
+    
+    # Extract silhouette scores dict for saving
+    sil_by_k = metrics.get("silhouette_by_k", {})
+    
     # Build save dict
     save_dict = {
         "run_indices": run_indices,
         "accs": accs,
         "c_values": c_values if c_values is not None else np.array([]),
         "importance": imps,
+        # Clustering results
+        "best_k": np.array([best_k]),
+        "labels": labels,
+        "entropy": np.array([entropy]),
+        "entropy_norm": np.array([entropy_norm]),
+        "silhouette_threshold": np.array([silhouette_threshold]),
+        "k1_accepted": np.array([metrics.get("k1_accepted", False)]),
     }
+    
+    # Save silhouette scores as separate arrays (can't mix dict in npz easily)
+    for k, score in sil_by_k.items():
+        if isinstance(k, int):
+            save_dict[f"silhouette_k{k}"] = np.array([score])
+    
+    # Save clustering decision rationale
+    if "k1_reason" in metrics:
+        # Store as a string array
+        save_dict["k1_reason"] = np.array([metrics["k1_reason"]], dtype=object)
+    if "rejected_k" in metrics:
+        save_dict["rejected_k"] = np.array([metrics["rejected_k"]])
+    if "rejected_silhouette" in metrics:
+        save_dict["rejected_silhouette"] = np.array([metrics["rejected_silhouette"]])
+    if "accepted_silhouette" in metrics:
+        save_dict["accepted_silhouette"] = np.array([metrics["accepted_silhouette"]])
+    
     save_dict.update(rf_params_arrays)
 
     np.savez(out_dir / f"aggregate_split{split_seed}.npz", **save_dict)
 
-    print(f"[aggregate] saved aggregate_split{split_seed}.npz (n={len(metas)}, keys={list(save_dict.keys())})")
+    print(f"[aggregate] saved aggregate_split{split_seed}.npz")
+    print(f"  n_runs={len(metas)}, best_k={best_k}, entropy_norm={entropy_norm:.4f}")
+    if metrics.get("k1_accepted"):
+        print(f"  k=1 accepted: {metrics.get('k1_reason', 'unknown')}")
 
 
-def pick_best_k_kmeans(X, k_min=2, k_max=8, seed=0):
+def pick_best_k_kmeans(X, k_max=8, seed=0, silhouette_threshold=0.25):
     """
-    Select k by silhouette score for k in [k_min, k_max].
-    Returns (best_k, labels, silhouette_by_k)
+    Select optimal k, allowing k=1 as a valid outcome.
+    
+    Methodology:
+    - k=1 is the null hypothesis (single basin / unimodal)
+    - We test k=2..k_max using silhouette score
+    - k>1 is accepted ONLY if silhouette score exceeds threshold
+    - This ensures we DISCOVER structure rather than IMPOSE it
+    
+    The silhouette threshold (default 0.25) represents minimum evidence
+    required to reject the k=1 null hypothesis:
+    - < 0.25: No substantial structure found → k=1
+    - 0.25-0.50: Weak structure
+    - 0.50-0.75: Reasonable structure  
+    - > 0.75: Strong structure
+    
+    Returns (best_k, labels, metrics_dict)
     """
     from sklearn.cluster import KMeans
     from sklearn.metrics import silhouette_score
 
     n = X.shape[0]
-    if n < k_min:
-        return 1, np.zeros(n, dtype=int), {}
+    metrics = {
+        "method": "silhouette_with_k1_null",
+        "silhouette_threshold": silhouette_threshold,
+        "silhouette_by_k": {},
+        "k1_accepted": False,
+    }
+    
+    # Degenerate check: if all vectors nearly identical, return k=1
+    if np.allclose(X, X.mean(axis=0), atol=1e-12):
+        metrics["k1_reason"] = "degenerate_identical_vectors"
+        metrics["k1_accepted"] = True
+        return 1, np.zeros(n, dtype=int), metrics
 
+    # Compute total variance (baseline for k=1)
+    total_variance = np.var(X, axis=0).sum()
+    metrics["total_variance"] = float(total_variance)
+    
+    # If variance is negligible, return k=1
+    if total_variance < 1e-10:
+        metrics["k1_reason"] = "negligible_variance"
+        metrics["k1_accepted"] = True
+        return 1, np.zeros(n, dtype=int), metrics
+
+    # Test k=2 to k_max
     best_k = 1
     best_score = -1.0
     best_labels = np.zeros(n, dtype=int)
-    sil_by_k = {}
-
-    # Degenerate check: if all vectors nearly identical, return k=1
-    # This avoids silhouette errors and aligns with the "collapse" case.
-    if np.allclose(X, X.mean(axis=0), atol=1e-12):
-        return 1, np.zeros(n, dtype=int), {}
-
-    for k in range(k_min, min(k_max, n) + 1):
+    
+    for k in range(2, min(k_max + 1, n)):
         km = KMeans(n_clusters=k, random_state=seed, n_init="auto")
         labels = km.fit_predict(X)
-        # If clustering collapses (rare), skip
-        if len(set(labels)) == 1:
+        
+        # If clustering collapses to fewer clusters, skip
+        if len(set(labels)) < k:
             continue
+        
         score = silhouette_score(X, labels, metric="euclidean")
-        sil_by_k[k] = float(score)
+        metrics["silhouette_by_k"][k] = float(score)
+        
         if score > best_score:
             best_score = score
             best_k = k
-            best_labels = labels
+            best_labels = labels.copy()
 
+    # Decision: accept k>1 only if silhouette exceeds threshold
+    if best_k > 1 and best_score < silhouette_threshold:
+        metrics["k1_reason"] = f"silhouette_{best_score:.3f}_below_threshold_{silhouette_threshold}"
+        metrics["k1_accepted"] = True
+        metrics["rejected_k"] = best_k
+        metrics["rejected_silhouette"] = float(best_score)
+        return 1, np.zeros(n, dtype=int), metrics
+    
     if best_k == 1:
-        return 1, np.zeros(n, dtype=int), sil_by_k
+        metrics["k1_reason"] = "no_valid_k_gt_1_found"
+        metrics["k1_accepted"] = True
+    else:
+        metrics["k1_accepted"] = False
+        metrics["accepted_silhouette"] = float(best_score)
 
-    return best_k, best_labels, sil_by_k
+    return best_k, best_labels, metrics
 
 
 def compute_entropy(labels, k):
@@ -562,15 +670,31 @@ def aggregate_and_cluster(args, split_seeds):
         for key in all_rf_params.keys():
             rf_params_universal[key] = np.concatenate(all_rf_params[key]).astype(float)
 
-    # Normalisation: center by mean and L2-normalise each run vector
+    # Normalisation per paper: center by mean and L2-normalise each run vector
     mu = importance.mean(axis=0)
     centered = importance - mu
     norms = np.linalg.norm(centered, axis=1, keepdims=True)
     norms = np.where(norms == 0, 1.0, norms)
     normed_importance = centered / norms
 
-    # Cluster in normed space
-    best_k, labels, sil_by_k = pick_best_k_kmeans(normed_importance, k_min=2, k_max=args.k_max, seed=args.seed)
+    # ==========================================================================
+    # CRITICAL: Universal manifold k = n_splits (by definition)
+    # Each split is an independent causal context. Clustering ACROSS splits
+    # is a category error. We assign labels based on split membership, NOT
+    # k-means silhouette optimization.
+    # ==========================================================================
+    n_splits = len(split_seeds)
+    best_k = n_splits
+    
+    # Labels are simply the split index (0, 1, 2, ..., n_splits-1)
+    # Map split_seed -> cluster label
+    seed_to_label = {seed: idx for idx, seed in enumerate(split_seeds)}
+    labels = np.array([seed_to_label[s] for s in split_ids], dtype=int)
+    
+    # No silhouette search for universal - k is fixed by experimental design
+    sil_by_k = {"note": "k=n_splits by design, no silhouette search performed"}
+    
+    # Compute entropy over the split-based clusters
     entropy = compute_entropy(labels, best_k)
 
     # Compute cluster centroids in normed space
@@ -601,15 +725,18 @@ def aggregate_and_cluster(args, split_seeds):
 
     summary = {
         "n_total": int(len(labels)),
+        "n_splits": int(n_splits),
         "best_k": int(best_k),
+        "k_method": "k=n_splits (splits are independent causal contexts)",
         "entropy": float(entropy),
         "cluster_sizes": cluster_sizes,
+        "split_seeds": [int(s) for s in split_seeds],
         "silhouette_by_k": sil_by_k,
     }
     save_json(summary, out_dir / "universal_summary.json")
 
     print("[universal] saved universal_* files")
-    print(f"[universal] best_k={best_k}, entropy={entropy:.4f}, cluster_sizes={cluster_sizes}")
+    print(f"[universal] k={best_k} (= n_splits), entropy={entropy:.4f}, cluster_sizes={cluster_sizes}")
 
     # Optionally inspect disagreements
     if args.disagreement:
@@ -842,6 +969,9 @@ def build_arg_parser():
 
     # Clustering / universal
     p.add_argument("--k_max", type=int, default=8, help="Max k for silhouette selection")
+    p.add_argument("--silhouette_threshold", type=float, default=0.25, 
+                   help="Minimum silhouette score to accept k>1 (default 0.25). "
+                        "Below this threshold, k=1 is returned (null hypothesis: single basin)")
     p.add_argument("--disagreement", action="store_true", help="Compute disagreement report on representative basins")
 
     # Mode
