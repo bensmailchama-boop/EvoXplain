@@ -3,10 +3,11 @@
 evoxplain_visualize_logreg_clustered.py
 
 Visualizer for Logistic Regression outputs that performs clustering on-the-fly.
+Adapted from evoxplain_visualize_rf_clustered.py for LogReg experiments.
 
 Key features:
 - Performs K-means clustering with silhouette-based k selection
-- L2 normalizes explanation vectors before clustering
+- L2 normalizes explanation vectors before clustering (as in paper)
 - Shows distinct cluster colors
 - Supports C value overlays (regularization strength)
 - Shows regularization regime analysis
@@ -39,7 +40,7 @@ def _npz_get(data, keys, default=None):
 
 
 def l2_normalize(X):
-    """Center and L2 normalize each row."""
+    """Center and L2 normalize each row (as done before clustering in paper)."""
     mu = X.mean(axis=0)
     centered = X - mu
     norms = np.linalg.norm(centered, axis=1, keepdims=True)
@@ -47,24 +48,37 @@ def l2_normalize(X):
     return normed, mu
 
 
-def find_best_k_silhouette(X_normed, k_min=2, k_max=8, seed=42):
+def find_best_k_silhouette(X_normed, k_max=8, seed=42, silhouette_threshold=0.25):
     """
-    Find optimal k using silhouette score.
+    Find optimal k, allowing k=1 as a valid outcome (null hypothesis).
+    
+    Methodology:
+    - k=1 is the null hypothesis (single basin / unimodal)
+    - We test k=2..k_max using silhouette score
+    - k>1 is accepted ONLY if silhouette score exceeds threshold
+    - This ensures we DISCOVER structure rather than IMPOSE it
+    
     Returns (best_k, labels, silhouette_scores_dict, best_silhouette)
     """
     n = X_normed.shape[0]
     
     # Check for degenerate case (all vectors identical)
     if np.allclose(X_normed, X_normed[0], atol=1e-10):
-        print("  [WARN] Degenerate case: all explanation vectors nearly identical")
-        return 1, np.zeros(n, dtype=int), {}, None
+        print("  [INFO] k=1: all explanation vectors nearly identical")
+        return 1, np.zeros(n, dtype=int), {"k1_reason": "identical_vectors"}, None
+    
+    # Check for negligible variance
+    total_variance = np.var(X_normed, axis=0).sum()
+    if total_variance < 1e-10:
+        print("  [INFO] k=1: negligible variance")
+        return 1, np.zeros(n, dtype=int), {"k1_reason": "negligible_variance"}, None
     
     best_k = 1
     best_score = -1.0
     best_labels = np.zeros(n, dtype=int)
     sil_scores = {}
     
-    for k in range(k_min, min(k_max + 1, n)):
+    for k in range(2, min(k_max + 1, n)):
         kmeans = KMeans(n_clusters=k, random_state=seed, n_init=10)
         labels = kmeans.fit_predict(X_normed)
         
@@ -80,10 +94,21 @@ def find_best_k_silhouette(X_normed, k_min=2, k_max=8, seed=42):
             best_k = k
             best_labels = labels.copy()
     
+    # Decision: accept k>1 only if silhouette exceeds threshold
+    if best_k > 1 and best_score < silhouette_threshold:
+        print(f"  [INFO] k=1: silhouette {best_score:.3f} < threshold {silhouette_threshold}")
+        sil_scores["k1_reason"] = f"silhouette_below_threshold"
+        sil_scores["rejected_k"] = best_k
+        sil_scores["rejected_silhouette"] = best_score
+        return 1, np.zeros(n, dtype=int), sil_scores, None
+    
+    if best_k == 1:
+        sil_scores["k1_reason"] = "no_valid_k_found"
+    
     return best_k, best_labels, sil_scores, best_score if best_k > 1 else None
 
 
-def load_and_cluster_split(npz_path: Path, k_min=2, k_max=8, seed=42):
+def load_and_cluster_split(npz_path: Path, k_max=8, seed=42, silhouette_threshold=0.25):
     """
     Load a split NPZ file, perform clustering, and return arrays dict + meta dict.
     """
@@ -113,12 +138,12 @@ def load_and_cluster_split(npz_path: Path, k_min=2, k_max=8, seed=42):
     
     importance = np.array(importance, dtype=float)
     
-    # L2 normalize for clustering
+    # L2 normalize for clustering (paper methodology)
     normed_importance, mu = l2_normalize(importance)
     
     # Perform clustering
     best_k, labels, sil_scores, best_sil = find_best_k_silhouette(
-        normed_importance, k_min=k_min, k_max=k_max, seed=seed
+        normed_importance, k_max=k_max, seed=seed, silhouette_threshold=silhouette_threshold
     )
     
     # Compute entropy
@@ -323,7 +348,7 @@ def plot_split_manifold_clustered(split_id: str, arrays: dict, meta: dict,
 
 
 def plot_universal_clustered(files, out_path: Path, overlay: str, use_normed: bool,
-                              k_min=2, k_max=None, seed=42):
+                              k_max=None, seed=42, silhouette_threshold=0.25):
     """
     Plot universal manifold stacking all splits.
     
@@ -364,7 +389,7 @@ def plot_universal_clustered(files, out_path: Path, overlay: str, use_normed: bo
         # Cluster THIS split independently
         normed_imp, mu = l2_normalize(importance)
         best_k, labels, sil_scores, best_sil = find_best_k_silhouette(
-            normed_imp, k_min=k_min, k_max=per_split_k_max, seed=seed
+            normed_imp, k_max=per_split_k_max, seed=seed, silhouette_threshold=silhouette_threshold
         )
         
         # Track split membership
@@ -542,7 +567,7 @@ def plot_universal_clustered(files, out_path: Path, overlay: str, use_normed: bo
 
 
 def plot_logreg_param_grid_clustered(files, out_dir: Path, use_normed: bool,
-                                      k_min=2, k_max=None, seed=42):
+                                      k_max=None, seed=42, silhouette_threshold=0.25):
     """
     Create a grid showing clusters + C distribution + accuracy.
     
@@ -577,7 +602,7 @@ def plot_logreg_param_grid_clustered(files, out_dir: Path, use_normed: bool,
         # Cluster THIS split independently
         normed_imp, mu = l2_normalize(importance)
         best_k, labels, sil_scores, best_sil = find_best_k_silhouette(
-            normed_imp, k_min=k_min, k_max=per_split_k_max, seed=seed
+            normed_imp, k_max=per_split_k_max, seed=seed, silhouette_threshold=silhouette_threshold
         )
         
         # Track split membership
@@ -705,9 +730,10 @@ def main():
                    help="Also plot universal manifold")
     ap.add_argument("--param_grid", action="store_true", 
                    help="Plot LogReg parameter grid with clusters")
-    ap.add_argument("--k_min", type=int, default=2, help="Min k for silhouette scan")
     ap.add_argument("--k_max", type=int, default=None, 
                    help="Max k for silhouette scan (default: n_splits for universal, 8 for per-split)")
+    ap.add_argument("--silhouette_threshold", type=float, default=0.25,
+                   help="Min silhouette score to accept k>1 (default 0.25). Below this, k=1 is returned.")
     ap.add_argument("--seed", type=int, default=42, help="Random seed for clustering")
     
     args = ap.parse_args()
@@ -738,7 +764,8 @@ def main():
 
     print(f"Found {n_splits} split files")
     print(f"Visualizing in '{args.space}' space with overlay='{args.overlay}'")
-    print(f"Clustering: k_min={args.k_min}, per-split k_max={per_split_k_max}, universal k_max={universal_k_max}")
+    print(f"Clustering: k_max={per_split_k_max}, silhouette_threshold={args.silhouette_threshold}")
+    print(f"  (k=1 is null hypothesis; k>1 accepted only if silhouette > threshold)")
     print(f"Output directory: {out_dir}")
     print()
 
@@ -752,7 +779,7 @@ def main():
         print(f"Processing {split_id}...")
         
         arrays, meta = load_and_cluster_split(
-            f, k_min=args.k_min, k_max=per_split_k_max, seed=args.seed
+            f, k_max=per_split_k_max, seed=args.seed, silhouette_threshold=args.silhouette_threshold
         )
         if arrays is None: 
             continue
@@ -784,14 +811,16 @@ def main():
         fname = f"UNIVERSAL_{args.space}_{args.overlay}.png"
         summary = plot_universal_clustered(
             files, out_dir / fname, overlay=args.overlay, 
-            use_normed=use_normed, k_min=args.k_min, k_max=universal_k_max, seed=args.seed
+            use_normed=use_normed, k_max=universal_k_max, seed=args.seed,
+            silhouette_threshold=args.silhouette_threshold
         )
 
     # Plot LogReg Parameter Grid with clustering (k_max = n_splits)
     if args.param_grid:
         plot_logreg_param_grid_clustered(
             files, out_dir, use_normed=use_normed,
-            k_min=args.k_min, k_max=universal_k_max, seed=args.seed
+            k_max=universal_k_max, seed=args.seed,
+            silhouette_threshold=args.silhouette_threshold
         )
         
     print("\nDone!")
