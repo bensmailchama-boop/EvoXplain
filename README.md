@@ -320,7 +320,7 @@ Example modification:
 If you use EvoXplain in your research, please cite:
 
 ```bibtex
-@article{evoxplain2024,
+@article{evoxplain2025,
   title={EvoXplain: When Machine Learning Models Agree on Predictions but Disagree on Why -- Measuring Mechanistic Multiplicity Across Training Runs},
   author={[Chama Bensmail]},
   journal={arXiv preprint arXiv:2512.22240},
