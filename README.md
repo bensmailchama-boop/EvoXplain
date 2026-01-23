@@ -212,10 +212,46 @@ Download and place in `data/adult.csv`.
 
 ## Methodology
 
+### k=1 Null Hypothesis
+
+EvoXplain treats **k=1 as the null hypothesis** when discovering mechanistic basins. This ensures we *discover* whether multiple basins exist rather than *assume* they do.
+
+Forcing k≥2 (as many clustering approaches do by default) would be methodologically incorrect for mechanistic analysis:
+
+- **Convex models** (e.g., Logistic Regression with fixed C) have a unique global optimum — all runs converge to identical explanations
+- Forcing k≥2 would artificially split a single basin, inflating entropy estimates
+
+#### Silhouette Threshold
+
+We accept k>1 only if the silhouette score exceeds a threshold (default: 0.25):
+
+| Silhouette | Interpretation | Decision |
+|------------|----------------|----------|
+| < 0.25 | No substantial cluster structure | Accept k=1 |
+| ≥ 0.25 | Evidence of multiple clusters | Accept best k |
+
+The threshold of 0.25 follows standard silhouette interpretation where values below 0.25 indicate no meaningful structure.
+
+#### Algorithm
+
+```
+1. If all explanation vectors are identical → return k=1
+2. If variance is negligible (< 1e-10) → return k=1  
+3. For k = 2 to k_max:
+   - Fit K-means, compute silhouette score
+   - Track best k by silhouette
+4. If best_silhouette < 0.25 → return k=1 (null hypothesis)
+5. Otherwise → return best_k
+```
+
+#### Validation
+
+The fixed-C control experiment validates this approach: Logistic Regression with C=1.0 correctly returns k=1 for all splits, with `k1_reason: "degenerate_identical_vectors"`.
+
 ### Clustering
 
 1. **Normalization:** Center by mean, L2-normalize each explanation vector
-2. **K-selection:** Silhouette score optimization over k ∈ [2, k_max]
+2. **K-selection:** Silhouette score optimization over k ∈ [2, k_max], with k=1 null hypothesis
 3. **Entropy:** Normalized Shannon entropy over cluster membership
 
 ### Key Metrics
