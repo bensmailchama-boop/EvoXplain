@@ -322,9 +322,9 @@ If you use EvoXplain in your research, please cite:
 ```bibtex
 @article{evoxplain2024,
   title={EvoXplain: When Machine Learning Models Agree on Predictions but Disagree on Why -- Measuring Mechanistic Multiplicity Across Training Runs},
-  author={[Authors]},
+  author={[Chama Bensmail]},
   journal={arXiv preprint arXiv:2512.22240},
-  year={2024}
+  year={2025}
 }
 ```
 
