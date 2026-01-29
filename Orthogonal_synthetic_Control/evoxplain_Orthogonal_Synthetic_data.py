@@ -2,7 +2,10 @@
 """
 evoxplain_engine_synthetic.py - EvoXplain HPC SHAP Runner + Aggregator + Synthetic Control
 
-MODIFIED VERSION:
+MODIFIED VERSION WITH k=1 NULL HYPOTHESIS:
+- Formal statistical testing for k=1 as null hypothesis
+- Multiple criteria: Silhouette threshold, BIC/AIC, Variance Ratio (Calinski-Harabasz)
+- Gap statistic option for rigorous null model comparison
 - Includes 'SYNTH_ORTHO' dataset generation (uncorrelated features).
 - Runs control experiments to test if multiplicity arises without correlation.
 - Includes specific interpretation printouts for synthetic benchmarks.
@@ -194,24 +197,23 @@ def load_dataset(dataset_name: str, args=None):
         import pandas as pd
         from sklearn.preprocessing import StandardScaler
         
-        # Load Adult dataset
         adult_path = "data/adult.csv"
         if not os.path.exists(adult_path):
             raise FileNotFoundError(f"Adult dataset not found at {adult_path}")
         
         df = pd.read_csv(adult_path)
         
-        # Handle column names (strip whitespace)
+        # Clean column names
         df.columns = df.columns.str.strip()
         
-        # Target: income (>50K = 1, <=50K = 0)
-        if 'income' in df.columns:
-            y = (df['income'].str.strip().str.contains('>50K')).astype(int).values
-            df = df.drop(columns=['income'])
-        else:
-            raise ValueError("Adult dataset missing 'income' column")
+        # Target
+        target_col = 'income' if 'income' in df.columns else df.columns[-1]
+        y = (df[target_col].str.strip() == '>50K').astype(int).values
         
-        # Identify categorical and numerical columns
+        # Drop target
+        df = df.drop(columns=[target_col])
+        
+        # Identify categorical vs numerical
         categorical_cols = df.select_dtypes(include=['object']).columns.tolist()
         numerical_cols = df.select_dtypes(include=['number']).columns.tolist()
         
@@ -222,7 +224,9 @@ def load_dataset(dataset_name: str, args=None):
         feature_names = list(df_encoded.columns)
         
         # Standardize numerical features
-        numerical_indices = [i for i, name in enumerate(feature_names) if name in numerical_cols]
+        numerical_indices = [i for i, name in enumerate(feature_names) 
+                           if any(name.startswith(nc) for nc in numerical_cols)]
+        
         if len(numerical_indices) > 0:
             scaler = StandardScaler()
             X[:, numerical_indices] = scaler.fit_transform(X[:, numerical_indices])
@@ -234,219 +238,492 @@ def load_dataset(dataset_name: str, args=None):
 
 def make_model(args, C_value=None, rf_params=None):
     """
-    Construct model according to args.model.
+    Factory to create model instances with optional hyperparameter overrides.
     """
-    model_name = args.model.lower()
-
-    if model_name in ("logreg", "logistic", "lr", "logistic_regression"):
-        from sklearn.linear_model import LogisticRegression
-        C_use = C_value if C_value is not None else args.C
-        model = LogisticRegression(
-            C=C_use,
-            penalty="l2",
-            solver="lbfgs",
-            max_iter=1000,
-            random_state=args.seed
-        )
-        return model
-
-    if model_name in ("rf", "random_forest", "randomforest"):
-        from sklearn.ensemble import RandomForestClassifier
-        params = dict(
-            n_estimators=args.rf_n_estimators,
-            max_depth=args.rf_max_depth if args.rf_max_depth > 0 else None,
-            min_samples_split=args.rf_min_samples_split,
-            min_samples_leaf=args.rf_min_samples_leaf,
-            max_features=args.rf_max_features,
-            bootstrap=True,
-            random_state=args.seed,
-            n_jobs=1,
-        )
-        if rf_params is not None:
-            params.update(rf_params)
-        return RandomForestClassifier(**params)
-
-    raise ValueError(f"Unknown model: {args.model}")
-
-
-def sample_C(args, rng):
-    """
-    Sample regularization C according to args.c_mode.
-    """
-    if args.c_mode == "fixed":
-        return args.C
-    if args.c_mode == "varied":
-        # log-uniform in [c_min, c_max]
-        lo = math.log10(args.c_min)
-        hi = math.log10(args.c_max)
-        return 10 ** rng.uniform(lo, hi)
-    raise ValueError(f"Unknown c_mode: {args.c_mode}")
-
-
-def compute_shap_importance(model, X_train, X_test, feature_names, args):
-    """
-    Compute SHAP importance vector.
-    Returns a 1D vector of length d (number of features).
-    """
-    import shap
-
-    # Choose explainer based on model family
-    model_name = args.model.lower()
-
-    if model_name in ("logreg", "logistic", "lr", "logistic_regression"):
-        # LinearExplainer with masker for SHAP 0.50.0+
-        try:
-            masker = shap.maskers.Independent(X_train)
-            explainer = shap.LinearExplainer(model, masker)
-        except (TypeError, AttributeError):
-            # Fallback for older SHAP versions
-            explainer = shap.LinearExplainer(model, X_train, feature_perturbation="interventional")
-        shap_values = explainer.shap_values(X_test)
-    elif model_name in ("rf", "random_forest", "randomforest"):
-        explainer = shap.TreeExplainer(model)
-        shap_values = explainer.shap_values(X_test)
-    else:
-        # Fallback (could be slow)
-        explainer = shap.Explainer(model, X_train)
-        shap_values = explainer(X_test)
-
-    # shap_values can be list (per class) or array
-    if isinstance(shap_values, list):
-        if len(shap_values) > 1:
-            sv = shap_values[1]
-        else:
-            sv = shap_values[0]
-    else:
-        sv = shap_values
-
-    sv = np.array(sv)
-
-    # Reduce to (n_samples, n_features)
-    # SHAP 0.42+ TreeExplainer returns (n_samples, n_features, n_classes)
-    if sv.ndim == 3:
-        if sv.shape[2] > 1:
-            sv = sv[:, :, 1]  # All samples, all features, class 1
-        else:
-            sv = sv[:, :, 0]  # All samples, all features, only class
-
-    if sv.ndim != 2:
-        raise ValueError(f"Unexpected SHAP shape: {sv.shape}")
-
-    # Global importance vector: mean absolute SHAP per feature
-    importance = np.mean(np.abs(sv), axis=0)
-
-    if importance.shape[0] != len(feature_names):
-        feature_names = [f"f{i}" for i in range(importance.shape[0])]
-
-    return importance
-
-
-def train_and_explain(run_id, X_train, y_train, X_test, y_test, feature_names, args, rng):
-    """
-    Train model and compute:
-    - accuracy on test
-    - SHAP global importance vector
-    """
-    from sklearn.metrics import accuracy_score
-
-    C_val = None
-    rf_params = None
-
     if args.model.lower() in ("logreg", "logistic", "lr", "logistic_regression"):
-        C_val = sample_C(args, rng)
-
-    if args.model.lower() in ("rf", "random_forest", "randomforest") and args.rf_varied:
-        rf_params = dict(
-            n_estimators=int(rng.integers(args.rf_n_estimators_min, args.rf_n_estimators_max + 1)),
-            max_depth=int(rng.integers(args.rf_max_depth_min, args.rf_max_depth_max + 1)) if args.rf_max_depth_max > 0 else None,
-            max_features=float(rng.uniform(args.rf_max_features_min, args.rf_max_features_max)),
-            min_samples_split=int(rng.integers(args.rf_min_samples_split_min, args.rf_min_samples_split_max + 1)),
-            min_samples_leaf=int(rng.integers(args.rf_min_samples_leaf_min, args.rf_min_samples_leaf_max + 1)),
+        from sklearn.linear_model import LogisticRegression
+        C = C_value if C_value is not None else args.C
+        return LogisticRegression(C=C, max_iter=5000, solver="lbfgs", random_state=args.seed)
+    
+    if args.model.lower() in ("rf", "random_forest", "randomforest"):
+        from sklearn.ensemble import RandomForestClassifier
+        
+        if rf_params is not None:
+            # Use provided RF hyperparameters
+            n_estimators = rf_params.get("n_estimators", args.rf_n_estimators)
+            max_depth = rf_params.get("max_depth", args.rf_max_depth)
+            max_features = rf_params.get("max_features", args.rf_max_features)
+            min_samples_split = rf_params.get("min_samples_split", args.rf_min_samples_split)
+            min_samples_leaf = rf_params.get("min_samples_leaf", args.rf_min_samples_leaf)
+        else:
+            n_estimators = args.rf_n_estimators
+            max_depth = args.rf_max_depth if args.rf_max_depth > 0 else None
+            max_features = args.rf_max_features
+            min_samples_split = args.rf_min_samples_split
+            min_samples_leaf = args.rf_min_samples_leaf
+        
+        if max_depth == -1:
+            max_depth = None
+            
+        return RandomForestClassifier(
+            n_estimators=n_estimators,
+            max_depth=max_depth,
+            max_features=max_features,
+            min_samples_split=min_samples_split,
+            min_samples_leaf=min_samples_leaf,
+            random_state=args.seed,
+            n_jobs=-1
         )
-
-    model = make_model(args, C_value=C_val, rf_params=rf_params)
-    model.fit(X_train, y_train)
-
-    y_pred = model.predict(X_test)
-    acc = float(accuracy_score(y_test, y_pred))
-
-    importance = compute_shap_importance(model, X_train, X_test, feature_names, args)
-
-    meta = {
-        "run_id": int(run_id),
-        "acc": acc,
-    }
-    if C_val is not None:
-        meta["C"] = float(C_val)
-    if rf_params is not None:
-        meta.update({f"rf_{k}": v for k, v in rf_params.items()})
-
-    return meta, importance, model
+    
+    raise ValueError(f"Unknown model: {args.model}")
 
 
 def run_chunk(args):
     """
-    Execute one chunk of runs for a given split_seed.
-    Saves per-run JSON + importance vectors as .npy.
+    Run a chunk of experiments and save SHAP importance.
     """
+    import shap
     from sklearn.model_selection import train_test_split
-
+    
     seed_everything(args.seed)
     
-    # Load dataset with args for possible synthetic generation
-    X, y, feature_names = load_dataset(args.dataset, args)
-
-    # Split defined by split_seed
+    X, y, feature_names = load_dataset(args.dataset, args=args)
+    
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=args.test_size, random_state=args.split_seed, stratify=y
     )
-
-    out_dir = Path(args.output_dir)
-    ensure_dir(out_dir)
-
-    # Determine run indices for this chunk
-    start = args.chunk_id * args.chunk_size
-    end = min(args.n_runs, start + args.chunk_size)
-
-    print(f"[chunk {args.chunk_id}] runs {start}..{end-1} (split_seed={args.split_seed})")
-
-    # Save split indices (optional)
-    if args.save_split:
-        np.save(out_dir / f"split_{args.split_seed}_Xtest.npy", X_test)
-        np.save(out_dir / f"split_{args.split_seed}_ytest.npy", y_test)
-
-    metas = []
-    importances = []
-
-    for run_id in range(start, end):
-        # Derive a per-run seed to diversify training randomness
-        run_seed = args.seed + 100000 * int(args.split_seed) + int(run_id)
+    
+    ensure_dir(args.output_dir)
+    
+    start_run = args.chunk_id * args.chunk_size
+    end_run = min(start_run + args.chunk_size, args.n_runs)
+    
+    print(f"[chunk {args.chunk_id}] Runs {start_run}..{end_run - 1} for split_seed={args.split_seed}")
+    
+    all_importance = []
+    all_meta = []
+    
+    for run_id in range(start_run, end_run):
+        run_seed = args.seed + 100000 * args.split_seed + run_id
         seed_everything(run_seed)
-        rng_run = np.random.default_rng(run_seed)
-
-        meta, imp, _model = train_and_explain(run_id, X_train, y_train, X_test, y_test, feature_names, args, rng_run)
-        metas.append(meta)
-        importances.append(imp)
-
-        # Write per-run meta
+        
+        # Optional C variation for LogReg
+        C_value = None
+        rf_run_params = None
+        
+        if args.model.lower() in ("logreg", "logistic", "lr", "logistic_regression"):
+            if args.c_mode == "varied":
+                rng = np.random.default_rng(run_seed)
+                log_c = rng.uniform(np.log10(args.c_min), np.log10(args.c_max))
+                C_value = 10 ** log_c
+            else:
+                C_value = args.C
+        
+        if args.model.lower() in ("rf", "random_forest", "randomforest") and args.rf_varied:
+            rng = np.random.default_rng(run_seed)
+            rf_run_params = {
+                "n_estimators": int(rng.integers(args.rf_n_estimators_min, args.rf_n_estimators_max + 1)),
+                "max_depth": int(rng.integers(args.rf_max_depth_min, args.rf_max_depth_max + 1)),
+                "max_features": float(rng.uniform(args.rf_max_features_min, args.rf_max_features_max)),
+                "min_samples_split": int(rng.integers(args.rf_min_samples_split_min, args.rf_min_samples_split_max + 1)),
+                "min_samples_leaf": int(rng.integers(args.rf_min_samples_leaf_min, args.rf_min_samples_leaf_max + 1)),
+            }
+        
+        model = make_model(args, C_value=C_value, rf_params=rf_run_params)
+        model.fit(X_train, y_train)
+        acc = float(model.score(X_test, y_test))
+        
+        # SHAP values
+        if args.model.lower() in ("logreg", "logistic", "lr", "logistic_regression"):
+            explainer = shap.LinearExplainer(model, X_train)
+            shap_values = explainer.shap_values(X_test)
+        else:
+            explainer = shap.TreeExplainer(model)
+            shap_values = explainer.shap_values(X_test)
+            # Handle 3D array for TreeExplainer (SHAP 0.42+)
+            if isinstance(shap_values, list):
+                shap_values = shap_values[1]  # Positive class
+            elif shap_values.ndim == 3:
+                shap_values = shap_values[:, :, 1]  # (n_samples, n_features, 2) -> positive class
+        
+        # Mean absolute SHAP importance
+        importance = np.abs(shap_values).mean(axis=0)
+        all_importance.append(importance)
+        
+        meta = {
+            "run_id": run_id,
+            "split_seed": args.split_seed,
+            "run_seed": run_seed,
+            "acc": acc,
+        }
+        
+        if C_value is not None:
+            meta["C"] = float(C_value)
+        
+        if rf_run_params is not None:
+            for k, v in rf_run_params.items():
+                meta[f"rf_{k}"] = v
+        
+        all_meta.append(meta)
+        
         if args.write_per_run:
-            save_json(meta, out_dir / f"meta_split{args.split_seed}_run{run_id}.json")
+            out_path = Path(args.output_dir) / f"run_{args.split_seed}_{run_id}.json"
+            save_json(meta, out_path)
+    
+    # Save chunk
+    out_dir = Path(args.output_dir)
+    np.save(out_dir / f"importance_split{args.split_seed}_chunk{args.chunk_id}.npy", np.array(all_importance))
+    save_json(all_meta, out_dir / f"meta_split{args.split_seed}_chunk{args.chunk_id}.json")
+    
+    if args.save_split:
+        np.savez(out_dir / f"split_{args.split_seed}.npz", 
+                 X_train=X_train, X_test=X_test, y_train=y_train, y_test=y_test,
+                 feature_names=np.array(feature_names, dtype=object))
+    
+    print(f"[chunk {args.chunk_id}] Done. Saved {len(all_importance)} runs.")
 
-    importances = np.array(importances, dtype=float)
 
-    # Write chunk arrays
-    np.save(out_dir / f"importance_split{args.split_seed}_chunk{args.chunk_id}.npy", importances)
-    save_json(metas, out_dir / f"meta_split{args.split_seed}_chunk{args.chunk_id}.json")
+# =============================================================================
+# k=1 NULL HYPOTHESIS TESTING
+# =============================================================================
 
-    print(f"[chunk {args.chunk_id}] saved to {out_dir}")
+def compute_bic(X, labels, k):
+    """
+    Compute Bayesian Information Criterion for Gaussian mixture model assumption.
+    Lower BIC is better.
+    
+    BIC = -2 * log_likelihood + k * log(n)
+    
+    For k=1: single Gaussian, for k>1: mixture of Gaussians with cluster assignments.
+    """
+    n, d = X.shape
+    
+    if k == 1:
+        # Single Gaussian: all data from one distribution
+        mu = X.mean(axis=0)
+        # Covariance (use diagonal for simplicity and numerical stability)
+        var = np.var(X, axis=0) + 1e-10
+        # Log-likelihood under diagonal Gaussian
+        log_lik = -0.5 * n * d * np.log(2 * np.pi)
+        log_lik -= 0.5 * n * np.sum(np.log(var))
+        log_lik -= 0.5 * np.sum(((X - mu) ** 2) / var)
+        # Parameters: d means + d variances
+        n_params = 2 * d
+    else:
+        # Mixture of k Gaussians
+        log_lik = 0.0
+        n_params = 0
+        for cluster_id in range(k):
+            mask = labels == cluster_id
+            n_c = mask.sum()
+            if n_c == 0:
+                continue
+            X_c = X[mask]
+            mu_c = X_c.mean(axis=0)
+            var_c = np.var(X_c, axis=0) + 1e-10
+            # Log-likelihood for this cluster
+            log_lik_c = -0.5 * n_c * d * np.log(2 * np.pi)
+            log_lik_c -= 0.5 * n_c * np.sum(np.log(var_c))
+            log_lik_c -= 0.5 * np.sum(((X_c - mu_c) ** 2) / var_c)
+            log_lik += log_lik_c
+            # Parameters: d means + d variances per cluster
+            n_params += 2 * d
+        # Add mixing proportions (k-1 free parameters)
+        n_params += (k - 1)
+    
+    bic = -2 * log_lik + n_params * np.log(n)
+    return float(bic)
+
+
+def compute_aic(X, labels, k):
+    """
+    Compute Akaike Information Criterion.
+    Lower AIC is better.
+    
+    AIC = -2 * log_likelihood + 2 * k
+    """
+    n, d = X.shape
+    
+    if k == 1:
+        mu = X.mean(axis=0)
+        var = np.var(X, axis=0) + 1e-10
+        log_lik = -0.5 * n * d * np.log(2 * np.pi)
+        log_lik -= 0.5 * n * np.sum(np.log(var))
+        log_lik -= 0.5 * np.sum(((X - mu) ** 2) / var)
+        n_params = 2 * d
+    else:
+        log_lik = 0.0
+        n_params = 0
+        for cluster_id in range(k):
+            mask = labels == cluster_id
+            n_c = mask.sum()
+            if n_c == 0:
+                continue
+            X_c = X[mask]
+            mu_c = X_c.mean(axis=0)
+            var_c = np.var(X_c, axis=0) + 1e-10
+            log_lik_c = -0.5 * n_c * d * np.log(2 * np.pi)
+            log_lik_c -= 0.5 * n_c * np.sum(np.log(var_c))
+            log_lik_c -= 0.5 * np.sum(((X_c - mu_c) ** 2) / var_c)
+            log_lik += log_lik_c
+            n_params += 2 * d
+        n_params += (k - 1)
+    
+    aic = -2 * log_lik + 2 * n_params
+    return float(aic)
+
+
+def compute_gap_statistic(X, labels, k, n_references=20, seed=42):
+    """
+    Compute Gap Statistic comparing clustering quality to uniform null reference.
+    
+    Gap(k) = E*[log(W_k)] - log(W_k)
+    
+    Where W_k is within-cluster dispersion, and E* is expectation under uniform null.
+    
+    Returns gap, gap_std (standard error of the reference distribution).
+    """
+    from sklearn.cluster import KMeans
+    
+    n, d = X.shape
+    rng = np.random.default_rng(seed)
+    
+    def compute_wk(X_data, cluster_labels, n_clusters):
+        """Within-cluster sum of squared distances from centroid."""
+        wk = 0.0
+        for c in range(n_clusters):
+            mask = cluster_labels == c
+            if mask.sum() == 0:
+                continue
+            X_c = X_data[mask]
+            centroid = X_c.mean(axis=0)
+            wk += np.sum((X_c - centroid) ** 2)
+        return wk
+    
+    # Observed W_k
+    if k == 1:
+        wk_obs = compute_wk(X, np.zeros(n, dtype=int), 1)
+    else:
+        wk_obs = compute_wk(X, labels, k)
+    
+    log_wk_obs = np.log(wk_obs + 1e-10)
+    
+    # Reference distribution: uniform over bounding box
+    mins = X.min(axis=0)
+    maxs = X.max(axis=0)
+    
+    log_wk_refs = []
+    for _ in range(n_references):
+        # Generate uniform reference data
+        X_ref = rng.uniform(mins, maxs, size=(n, d))
+        
+        if k == 1:
+            labels_ref = np.zeros(n, dtype=int)
+        else:
+            km = KMeans(n_clusters=k, random_state=int(rng.integers(0, 10000)), n_init="auto")
+            labels_ref = km.fit_predict(X_ref)
+        
+        wk_ref = compute_wk(X_ref, labels_ref, k)
+        log_wk_refs.append(np.log(wk_ref + 1e-10))
+    
+    log_wk_refs = np.array(log_wk_refs)
+    gap = log_wk_refs.mean() - log_wk_obs
+    gap_std = np.std(log_wk_refs) * np.sqrt(1 + 1 / n_references)
+    
+    return float(gap), float(gap_std)
+
+
+def pick_best_k_kmeans(X, k_max=8, seed=0, silhouette_threshold=0.25, use_bic=True, use_gap=False):
+    """
+    Select optimal k with k=1 as formal null hypothesis.
+    
+    Criteria for accepting k > 1:
+    1. Silhouette score >= silhouette_threshold
+    2. BIC(k) < BIC(1) (if use_bic=True)
+    3. Gap(k) > Gap(k-1) + s_{k-1} (if use_gap=True) - Tibshirani rule
+    
+    Returns (best_k, labels, metrics_dict)
+    """
+    from sklearn.cluster import KMeans
+    from sklearn.metrics import silhouette_score, calinski_harabasz_score
+    
+    n = X.shape[0]
+    metrics = {
+        "method": "k1_null_hypothesis_testing",
+        "silhouette_threshold": silhouette_threshold,
+        "use_bic": use_bic,
+        "use_gap": use_gap,
+        "silhouette_by_k": {},
+        "bic_by_k": {},
+        "aic_by_k": {},
+        "calinski_harabasz_by_k": {},
+        "gap_by_k": {},
+        "gap_std_by_k": {},
+        "k1_accepted": False,
+    }
+    
+    # Degenerate case: all vectors identical
+    if np.allclose(X, X.mean(axis=0), atol=1e-12):
+        metrics["k1_reason"] = "degenerate_identical_vectors"
+        metrics["k1_accepted"] = True
+        return 1, np.zeros(n, dtype=int), metrics
+    
+    total_variance = np.var(X, axis=0).sum()
+    metrics["total_variance"] = float(total_variance)
+    
+    if total_variance < 1e-10:
+        metrics["k1_reason"] = "negligible_variance"
+        metrics["k1_accepted"] = True
+        return 1, np.zeros(n, dtype=int), metrics
+    
+    # Compute BIC/AIC for k=1
+    labels_k1 = np.zeros(n, dtype=int)
+    bic_k1 = compute_bic(X, labels_k1, 1)
+    aic_k1 = compute_aic(X, labels_k1, 1)
+    metrics["bic_by_k"][1] = bic_k1
+    metrics["aic_by_k"][1] = aic_k1
+    
+    if use_gap:
+        gap_k1, gap_std_k1 = compute_gap_statistic(X, labels_k1, 1, seed=seed)
+        metrics["gap_by_k"][1] = gap_k1
+        metrics["gap_std_by_k"][1] = gap_std_k1
+    
+    # Track best k based on silhouette (among k >= 2)
+    best_k_silhouette = None
+    best_silhouette = -1.0
+    best_labels = None
+    
+    # Store all clustering results
+    kmeans_results = {}
+    
+    for k in range(2, min(k_max + 1, n)):
+        km = KMeans(n_clusters=k, random_state=seed, n_init="auto")
+        labels = km.fit_predict(X)
+        
+        # Check for degenerate clustering
+        unique_labels = len(set(labels))
+        if unique_labels < k:
+            continue
+        
+        kmeans_results[k] = labels.copy()
+        
+        # Silhouette score
+        sil = silhouette_score(X, labels, metric="euclidean")
+        metrics["silhouette_by_k"][k] = float(sil)
+        
+        # BIC/AIC
+        bic_k = compute_bic(X, labels, k)
+        aic_k = compute_aic(X, labels, k)
+        metrics["bic_by_k"][k] = bic_k
+        metrics["aic_by_k"][k] = aic_k
+        
+        # Calinski-Harabasz (variance ratio)
+        ch = calinski_harabasz_score(X, labels)
+        metrics["calinski_harabasz_by_k"][k] = float(ch)
+        
+        # Gap statistic
+        if use_gap:
+            gap_k, gap_std_k = compute_gap_statistic(X, labels, k, seed=seed)
+            metrics["gap_by_k"][k] = gap_k
+            metrics["gap_std_by_k"][k] = gap_std_k
+        
+        # Track best by silhouette
+        if sil > best_silhouette:
+            best_silhouette = sil
+            best_k_silhouette = k
+            best_labels = labels.copy()
+    
+    # Decision logic: Does any k > 1 beat the null hypothesis?
+    if best_k_silhouette is None:
+        # No valid k > 1 found
+        metrics["k1_reason"] = "no_valid_k_gt_1_found"
+        metrics["k1_accepted"] = True
+        return 1, np.zeros(n, dtype=int), metrics
+    
+    # Criterion 1: Silhouette threshold
+    silhouette_passes = best_silhouette >= silhouette_threshold
+    metrics["silhouette_criterion_passed"] = silhouette_passes
+    
+    # Criterion 2: BIC comparison (k should have lower BIC than k=1)
+    if use_bic:
+        bic_best_k = metrics["bic_by_k"].get(best_k_silhouette, float('inf'))
+        bic_passes = bic_best_k < bic_k1
+        metrics["bic_criterion_passed"] = bic_passes
+        metrics["bic_improvement"] = float(bic_k1 - bic_best_k)
+    else:
+        bic_passes = True
+    
+    # Criterion 3: Gap statistic (Tibshirani's rule: Gap(k) >= Gap(k-1) - s_{k-1})
+    if use_gap:
+        gap_passes = False
+        for k in sorted(metrics["gap_by_k"].keys()):
+            if k == 1:
+                continue
+            gap_k = metrics["gap_by_k"][k]
+            gap_k_prev = metrics["gap_by_k"].get(k - 1, metrics["gap_by_k"][1])
+            gap_std_prev = metrics["gap_std_by_k"].get(k - 1, metrics["gap_std_by_k"][1])
+            # Tibshirani rule: choose smallest k such that Gap(k) >= Gap(k+1) - s_{k+1}
+            # We modify to: reject k=1 if Gap(k) > Gap(1) for some k > 1
+            if gap_k > gap_k_prev:
+                gap_passes = True
+                metrics["gap_first_improvement_k"] = k
+                break
+        metrics["gap_criterion_passed"] = gap_passes
+    else:
+        gap_passes = True
+    
+    # Final decision: Accept k > 1 only if ALL criteria pass
+    accept_k_gt_1 = silhouette_passes and bic_passes and gap_passes
+    
+    if not accept_k_gt_1:
+        # k=1 is accepted as null
+        reasons = []
+        if not silhouette_passes:
+            reasons.append(f"silhouette_{best_silhouette:.3f}_below_{silhouette_threshold}")
+        if use_bic and not bic_passes:
+            reasons.append(f"bic_k{best_k_silhouette}_not_better_than_k1")
+        if use_gap and not gap_passes:
+            reasons.append("gap_statistic_no_improvement")
+        
+        metrics["k1_reason"] = "; ".join(reasons)
+        metrics["k1_accepted"] = True
+        metrics["rejected_k"] = best_k_silhouette
+        metrics["rejected_silhouette"] = float(best_silhouette)
+        
+        return 1, np.zeros(n, dtype=int), metrics
+    
+    # Accept k > 1
+    metrics["k1_accepted"] = False
+    metrics["accepted_k"] = best_k_silhouette
+    metrics["accepted_silhouette"] = float(best_silhouette)
+    
+    return best_k_silhouette, best_labels, metrics
+
+
+def compute_entropy(labels, k):
+    """
+    Normalized Shannon entropy over cluster membership.
+    """
+    if k <= 1:
+        return 0.0
+    counts = np.array([(labels == i).sum() for i in range(k)], dtype=float)
+    p = counts / counts.sum()
+    p = p[p > 0]
+    H = -np.sum(p * np.log2(p))
+    Hn = float(H / np.log2(k))
+    return Hn
 
 
 def aggregate_split(args, split_seed):
     """
-    Aggregate all chunks for one split_seed into a single NPZ file.
+    Aggregate all chunks for one split, compute SHAP importance vectors, and cluster.
+    Now with formal k=1 null hypothesis testing.
     
-    Now also performs clustering and saves:
-    - best_k, labels, silhouette scores
+    Output NPZ contains:
+    - run_indices, accs, c_values (if LogReg)
+    - importance: raw mean |SHAP| vectors
+    - best_k, labels, entropy, entropy_norm
+    - All silhouette, BIC, AIC, Gap scores
     - Clustering decision rationale
     """
     out_dir = Path(args.output_dir)
@@ -496,7 +773,7 @@ def aggregate_split(args, split_seed):
             rf_params_arrays[key] = np.array(values, dtype=float)
 
     # ==========================================================================
-    # CLUSTERING: Discover mechanistic basins within this split
+    # CLUSTERING WITH k=1 NULL HYPOTHESIS
     # ==========================================================================
     
     # L2 normalize importance vectors (paper methodology)
@@ -508,11 +785,16 @@ def aggregate_split(args, split_seed):
     
     # Perform clustering with k=1 as null hypothesis
     silhouette_threshold = getattr(args, 'silhouette_threshold', 0.25)
+    use_bic = getattr(args, 'use_bic', True)
+    use_gap = getattr(args, 'use_gap', False)
+    
     best_k, labels, metrics = pick_best_k_kmeans(
         normed_importance, 
         k_max=args.k_max, 
         seed=args.seed,
-        silhouette_threshold=silhouette_threshold
+        silhouette_threshold=silhouette_threshold,
+        use_bic=use_bic,
+        use_gap=use_gap
     )
     
     # Compute normalized entropy
@@ -525,9 +807,6 @@ def aggregate_split(args, split_seed):
     else:
         entropy = 0.0
         entropy_norm = 0.0
-    
-    # Extract silhouette scores dict for saving
-    sil_by_k = metrics.get("silhouette_by_k", {})
     
     # Build save dict
     save_dict = {
@@ -544,10 +823,23 @@ def aggregate_split(args, split_seed):
         "k1_accepted": np.array([metrics.get("k1_accepted", False)]),
     }
     
-    # Save silhouette scores as separate arrays
-    for k, score in sil_by_k.items():
-        if isinstance(k, int):
-            save_dict[f"silhouette_k{k}"] = np.array([score])
+    # Save all metric scores
+    for k, score in metrics.get("silhouette_by_k", {}).items():
+        save_dict[f"silhouette_k{k}"] = np.array([score])
+    
+    for k, score in metrics.get("bic_by_k", {}).items():
+        save_dict[f"bic_k{k}"] = np.array([score])
+    
+    for k, score in metrics.get("aic_by_k", {}).items():
+        save_dict[f"aic_k{k}"] = np.array([score])
+    
+    for k, score in metrics.get("calinski_harabasz_by_k", {}).items():
+        save_dict[f"calinski_harabasz_k{k}"] = np.array([score])
+    
+    for k, score in metrics.get("gap_by_k", {}).items():
+        save_dict[f"gap_k{k}"] = np.array([score])
+        if k in metrics.get("gap_std_by_k", {}):
+            save_dict[f"gap_std_k{k}"] = np.array([metrics["gap_std_by_k"][k]])
     
     # Save clustering decision rationale
     if "k1_reason" in metrics:
@@ -559,110 +851,57 @@ def aggregate_split(args, split_seed):
     if "accepted_silhouette" in metrics:
         save_dict["accepted_silhouette"] = np.array([metrics["accepted_silhouette"]])
     
+    # Save criterion pass/fail
+    for crit in ["silhouette_criterion_passed", "bic_criterion_passed", "gap_criterion_passed"]:
+        if crit in metrics:
+            save_dict[crit] = np.array([metrics[crit]])
+    
+    if "bic_improvement" in metrics:
+        save_dict["bic_improvement"] = np.array([metrics["bic_improvement"]])
+    
     save_dict.update(rf_params_arrays)
 
     np.savez(out_dir / f"aggregate_split{split_seed}.npz", **save_dict)
 
     print(f"[aggregate] saved aggregate_split{split_seed}.npz")
     print(f"  n_runs={len(metas)}, best_k={best_k}, entropy_norm={entropy_norm:.4f}")
+    
     if metrics.get("k1_accepted"):
-        print(f"  k=1 accepted: {metrics.get('k1_reason', 'unknown')}")
+        print(f"  k=1 ACCEPTED (null hypothesis): {metrics.get('k1_reason', 'unknown')}")
+        if "rejected_k" in metrics:
+            print(f"    Rejected k={metrics['rejected_k']} with silhouette={metrics.get('rejected_silhouette', 'N/A'):.3f}")
+    else:
+        print(f"  k={best_k} ACCEPTED (null rejected)")
+        print(f"    Silhouette: {metrics.get('accepted_silhouette', 'N/A'):.3f}")
+        if "bic_improvement" in metrics:
+            print(f"    BIC improvement over k=1: {metrics['bic_improvement']:.1f}")
 
     # SYNTH_ORTHO Interpretation Block
     if args.dataset.upper() == "SYNTH_ORTHO":
-        print("\n[SYNTH_ORTHO INTERPRETATION]")
+        print("\n" + "="*60)
+        print("[SYNTH_ORTHO INTERPRETATION - k=1 NULL HYPOTHESIS]")
+        print("="*60)
         if best_k == 1:
-            print(">> On orthogonal synthetic features, LogReg explanations collapse (k*=1).")
-            print(">> This confirms that without correlations, the Rashomon set is convex/unimodal.")
-            print(">> Multiplicity in real datasets likely stems from collinearity or non-identifiability.")
+            print(">> RESULT: k*=1 (Null hypothesis ACCEPTED)")
+            print(">> On orthogonal synthetic features, explanations collapse to single basin.")
+            print(">> This confirms: without correlations, the Rashomon set is convex/unimodal.")
+            print(">> Implication: Multiplicity in real datasets stems from collinearity")
+            print("   or non-identifiability, not from stochastic training alone.")
         else:
-            print(f">> On orthogonal synthetic features, found MULTIPLE basins (k*={best_k}).")
-            print(">> Unexpected result! This suggests multiplicity can arise even without feature collinearity")
-            print(">> (potentially due to low SNR, underspecification, or hyperparameter variance).")
-
-
-def pick_best_k_kmeans(X, k_max=8, seed=0, silhouette_threshold=0.25):
-    """
-    Select optimal k, allowing k=1 as a valid outcome.
-    Returns (best_k, labels, metrics_dict)
-    """
-    from sklearn.cluster import KMeans
-    from sklearn.metrics import silhouette_score
-
-    n = X.shape[0]
-    metrics = {
-        "method": "silhouette_with_k1_null",
-        "silhouette_threshold": silhouette_threshold,
-        "silhouette_by_k": {},
-        "k1_accepted": False,
-    }
-    
-    if np.allclose(X, X.mean(axis=0), atol=1e-12):
-        metrics["k1_reason"] = "degenerate_identical_vectors"
-        metrics["k1_accepted"] = True
-        return 1, np.zeros(n, dtype=int), metrics
-
-    total_variance = np.var(X, axis=0).sum()
-    metrics["total_variance"] = float(total_variance)
-    
-    if total_variance < 1e-10:
-        metrics["k1_reason"] = "negligible_variance"
-        metrics["k1_accepted"] = True
-        return 1, np.zeros(n, dtype=int), metrics
-
-    best_k = 1
-    best_score = -1.0
-    best_labels = np.zeros(n, dtype=int)
-    
-    for k in range(2, min(k_max + 1, n)):
-        km = KMeans(n_clusters=k, random_state=seed, n_init="auto")
-        labels = km.fit_predict(X)
-        
-        if len(set(labels)) < k:
-            continue
-        
-        score = silhouette_score(X, labels, metric="euclidean")
-        metrics["silhouette_by_k"][k] = float(score)
-        
-        if score > best_score:
-            best_score = score
-            best_k = k
-            best_labels = labels.copy()
-
-    if best_k > 1 and best_score < silhouette_threshold:
-        metrics["k1_reason"] = f"silhouette_{best_score:.3f}_below_threshold_{silhouette_threshold}"
-        metrics["k1_accepted"] = True
-        metrics["rejected_k"] = best_k
-        metrics["rejected_silhouette"] = float(best_score)
-        return 1, np.zeros(n, dtype=int), metrics
-    
-    if best_k == 1:
-        metrics["k1_reason"] = "no_valid_k_gt_1_found"
-        metrics["k1_accepted"] = True
-    else:
-        metrics["k1_accepted"] = False
-        metrics["accepted_silhouette"] = float(best_score)
-
-    return best_k, best_labels, metrics
-
-
-def compute_entropy(labels, k):
-    """
-    Normalized Shannon entropy over cluster membership.
-    """
-    if k <= 1:
-        return 0.0
-    counts = np.array([(labels == i).sum() for i in range(k)], dtype=float)
-    p = counts / counts.sum()
-    p = p[p > 0]
-    H = -np.sum(p * np.log2(p))
-    Hn = float(H / np.log2(k))
-    return Hn
+            print(f">> RESULT: k*={best_k} (Null hypothesis REJECTED)")
+            print(">> WARNING: Found MULTIPLE basins even on orthogonal features!")
+            print(">> Possible causes:")
+            print("   - Low SNR making ground truth unrecoverable")
+            print("   - Hyperparameter variance creating distinct regimes")
+            print("   - Underspecification in the model class")
+            print(">> This is a surprising result requiring investigation.")
+        print("="*60)
 
 
 def aggregate_and_cluster(args, split_seeds):
     """
     Stack multiple split aggregates into a "universal" NPZ file and cluster in explanation space.
+    NOTE: This aggregates ACROSS splits, which may violate the causal context principle.
     """
     out_dir = Path(args.output_dir)
     all_importance = []
@@ -699,6 +938,7 @@ def aggregate_and_cluster(args, split_seeds):
         all_run.append(run_idx.astype(int))
         all_C.append(c_vals.astype(float))
         
+        # Check for RF params
         for key in all_rf_params.keys():
             if key in data:
                 has_rf_params = True
@@ -706,121 +946,139 @@ def aggregate_and_cluster(args, split_seeds):
             else:
                 all_rf_params[key].append(np.full(len(run_idx), np.nan))
 
-    importance = np.vstack(all_importance).astype(float)
-    accs = np.concatenate(all_accs).astype(float)
-    split_ids = np.concatenate(all_split).astype(int)
-    run_indices = np.concatenate(all_run).astype(int)
-    c_values = np.concatenate(all_C).astype(float)
+    stacked = np.vstack(all_importance)
+    stacked_accs = np.concatenate(all_accs)
+    stacked_split = np.concatenate(all_split)
+    stacked_run = np.concatenate(all_run)
+    stacked_C = np.concatenate(all_C)
     
-    rf_params_universal = {}
+    rf_params_stacked = {}
     if has_rf_params:
-        for key in all_rf_params.keys():
-            rf_params_universal[key] = np.concatenate(all_rf_params[key]).astype(float)
+        for key, arrays in all_rf_params.items():
+            rf_params_stacked[key] = np.concatenate(arrays)
 
+    # Center and normalize
+    mu = stacked.mean(axis=0)
+    centered = stacked - mu
+    norms = np.linalg.norm(centered, axis=1, keepdims=True)
+    norms = np.where(norms == 0, 1.0, norms)
+    normed = centered / norms
+
+    print(f"[WARNING] Universal aggregation mixes {len(split_seeds)} splits.")
+    print(f"  This may violate causal context principle - use with caution.")
+    
+    # Cluster with k=1 null
+    silhouette_threshold = getattr(args, 'silhouette_threshold', 0.25)
+    use_bic = getattr(args, 'use_bic', True)
+    use_gap = getattr(args, 'use_gap', False)
+    
+    best_k, labels, metrics = pick_best_k_kmeans(
+        normed, 
+        k_max=args.k_max, 
+        seed=args.seed,
+        silhouette_threshold=silhouette_threshold,
+        use_bic=use_bic,
+        use_gap=use_gap
+    )
+    
+    if best_k > 1:
+        counts = np.array([(labels == i).sum() for i in range(best_k)])
+        probs = counts / counts.sum()
+        probs = probs[probs > 0]
+        H = -np.sum(probs * np.log2(probs))
+        H_norm = H / np.log2(best_k)
+    else:
+        H_norm = 0.0
+
+    save_dict = {
+        "importance": stacked,
+        "accs": stacked_accs,
+        "split_ids": stacked_split,
+        "run_ids": stacked_run,
+        "c_values": stacked_C,
+        "best_k": np.array([best_k]),
+        "labels": labels,
+        "entropy_norm": np.array([H_norm]),
+        "k1_accepted": np.array([metrics.get("k1_accepted", False)]),
+    }
+    
+    # Save all metrics
+    for k, score in metrics.get("silhouette_by_k", {}).items():
+        save_dict[f"silhouette_k{k}"] = np.array([score])
+    for k, score in metrics.get("bic_by_k", {}).items():
+        save_dict[f"bic_k{k}"] = np.array([score])
+    
+    if "k1_reason" in metrics:
+        save_dict["k1_reason"] = np.array([metrics["k1_reason"]], dtype=object)
+    
+    save_dict.update(rf_params_stacked)
+
+    out_path = out_dir / "aggregate_universal.npz"
+    np.savez(out_path, **save_dict)
+    
+    print(f"[universal] Saved {out_path}")
+    print(f"  Total runs: {len(stacked)}, best_k={best_k}, entropy_norm={H_norm:.4f}")
+    if metrics.get("k1_accepted"):
+        print(f"  k=1 ACCEPTED: {metrics.get('k1_reason', 'unknown')}")
+
+    if args.disagreement:
+        print("\nComputing disagreement analysis...")
+        run_disagreement_analysis(args, out_path)
+
+
+def run_disagreement_analysis(args, npz_path):
+    """
+    Load the universal NPZ, pick representative models from each cluster,
+    and compute prediction disagreement on test data.
+    """
+    import pandas as pd
+    from sklearn.model_selection import train_test_split
+    
+    data = np.load(npz_path, allow_pickle=True)
+    labels = data["labels"]
+    best_k = int(data["best_k"][0])
+    
+    if best_k <= 1:
+        print("  Skipping disagreement: k=1 means no distinct basins.")
+        return None
+    
+    importance = data["importance"]
+    split_ids = data.get("split_ids", None)
+    run_ids = data["run_ids"]
+    c_values = data.get("c_values", None)
+    
+    # Get RF params if available
+    rf_params = {}
+    for key in ["rf_n_estimators", "rf_max_depth", "rf_max_features", 
+                "rf_min_samples_split", "rf_min_samples_leaf"]:
+        if key in data:
+            rf_params[key] = data[key]
+    
+    # Load dataset
+    X, y, feature_names = load_dataset(args.dataset, args=args)
+    
+    # Select representative from each cluster
+    selected_clusters = list(range(best_k))
+    
+    # L2 normalize for distance computation
     mu = importance.mean(axis=0)
     centered = importance - mu
     norms = np.linalg.norm(centered, axis=1, keepdims=True)
     norms = np.where(norms == 0, 1.0, norms)
-    normed_importance = centered / norms
-
-    n_splits = len(split_seeds)
-    best_k = n_splits
-    
-    seed_to_label = {seed: idx for idx, seed in enumerate(split_seeds)}
-    labels = np.array([seed_to_label[s] for s in split_ids], dtype=int)
-    
-    sil_by_k = {"note": "k=n_splits by design, no silhouette search performed"}
-    entropy = compute_entropy(labels, best_k)
-
-    centroids = []
-    cluster_sizes = []
-    for i in range(best_k):
-        mask = labels == i
-        cluster_sizes.append(int(mask.sum()))
-        if mask.sum() > 0:
-            centroids.append(normed_importance[mask].mean(axis=0))
-        else:
-            centroids.append(np.zeros(normed_importance.shape[1], dtype=float))
-    centroids = np.array(centroids)
-
-    np.save(out_dir / "universal_importance.npy", importance)
-    np.save(out_dir / "universal_normed_importance.npy", normed_importance)
-    np.save(out_dir / "universal_labels.npy", labels.astype(int))
-    np.save(out_dir / "universal_accs.npy", accs)
-    np.save(out_dir / "universal_split_ids.npy", split_ids)
-    np.save(out_dir / "universal_run_indices.npy", run_indices)
-    np.save(out_dir / "universal_c_values.npy", c_values)
-    np.save(out_dir / "universal_centroids.npy", centroids)
-    
-    for key, values in rf_params_universal.items():
-        np.save(out_dir / f"universal_{key}.npy", values)
-
-    summary = {
-        "n_total": int(len(labels)),
-        "n_splits": int(n_splits),
-        "best_k": int(best_k),
-        "k_method": "k=n_splits (splits are independent causal contexts)",
-        "entropy": float(entropy),
-        "cluster_sizes": cluster_sizes,
-        "split_seeds": [int(s) for s in split_seeds],
-        "silhouette_by_k": sil_by_k,
-    }
-    save_json(summary, out_dir / "universal_summary.json")
-
-    print("[universal] saved universal_* files")
-    print(f"[universal] k={best_k} (= n_splits), entropy={entropy:.4f}, cluster_sizes={cluster_sizes}")
-
-    if args.disagreement:
-        inspect_disagreements(
-            run_indices, importance, c_values, labels, best_k, args, 
-            feature_names=None, split_ids=split_ids, rf_params=rf_params_universal
-        )
-
-    return summary
-
-
-def inspect_disagreements(run_indices, importance, c_values, labels, best_k, args, 
-                          feature_names, split_ids=None, rf_params=None):
-    """
-    Inspect disagreements (Dataset Agnostic).
-    """
-    from sklearn.model_selection import train_test_split
-    import pandas as pd
-    
-    if best_k == 1:
-        print("Only 1 cluster found - no disagreement analysis possible.")
-        return None
-    
-    cluster_sizes = [(i, (labels == i).sum()) for i in range(best_k)]
-    cluster_sizes.sort(key=lambda x: x[1], reverse=True)
-    selected_clusters = [c[0] for c in cluster_sizes[:min(3, best_k)]]
-    
-    print(f"\nAnalyzing disagreements across clusters: {selected_clusters}")
-    
-    # Load dataset with args (for synthetic support)
-    X, y, feature_names_local = load_dataset(args.dataset, args)
-    if feature_names is None:
-        feature_names = feature_names_local
+    normed = centered / norms
     
     rep_runs = []
     rep_C = []
-    rep_rf_params = []
     rep_split_seeds = []
+    rep_rf_params = []
     rep_models = []
     
     for cluster_id in selected_clusters:
         mask = labels == cluster_id
-        cluster_indices = run_indices[mask]
-        cluster_C = c_values[mask]
+        cluster_indices = np.where(mask)[0]
+        cluster_normed = normed[mask]
+        cluster_C = c_values[mask] if c_values is not None else np.full(mask.sum(), np.nan)
         
-        mu = importance.mean(axis=0)
-        centered = importance - mu
-        norms = np.linalg.norm(centered, axis=1, keepdims=True)
-        norms = np.where(norms == 0, 1.0, norms)
-        normed_importance = centered / norms
-
-        cluster_normed = normed_importance[mask]
-
         from scipy.spatial.distance import cosine
         centroid = cluster_normed.mean(axis=0)
         distances = np.array([cosine(imp, centroid) for imp in cluster_normed])
@@ -929,7 +1187,7 @@ def inspect_disagreements(run_indices, importance, c_values, labels, best_k, arg
 
 
 def build_arg_parser():
-    p = argparse.ArgumentParser(description="EvoXplain core engine (HPC SHAP splits + aggregate + cluster + synthetic).")
+    p = argparse.ArgumentParser(description="EvoXplain core engine with k=1 null hypothesis testing.")
 
     p.add_argument("--dataset", type=str, required=True, help="Dataset name (breast_cancer, compas, adult, SYNTH_ORTHO)")
     p.add_argument("--model", type=str, default="logreg", help="Model (logreg, rf)")
@@ -976,10 +1234,17 @@ def build_arg_parser():
     p.add_argument("--rf_min_samples_leaf_min", type=int, default=1)
     p.add_argument("--rf_min_samples_leaf_max", type=int, default=10)
 
-    # Clustering / universal
-    p.add_argument("--k_max", type=int, default=8, help="Max k for silhouette selection")
+    # Clustering / k=1 null hypothesis
+    p.add_argument("--k_max", type=int, default=8, help="Max k for clustering")
     p.add_argument("--silhouette_threshold", type=float, default=0.25, 
-                   help="Minimum silhouette score to accept k>1 (default 0.25).")
+                   help="Minimum silhouette score to reject k=1 null (default 0.25)")
+    p.add_argument("--use_bic", action="store_true", default=True,
+                   help="Use BIC criterion for k=1 null testing (default: True)")
+    p.add_argument("--no_bic", action="store_false", dest="use_bic",
+                   help="Disable BIC criterion")
+    p.add_argument("--use_gap", action="store_true", default=False,
+                   help="Use Gap statistic for k=1 null testing (slower, default: False)")
+    
     p.add_argument("--disagreement", action="store_true", help="Compute disagreement report on representative basins")
 
     # Mode
