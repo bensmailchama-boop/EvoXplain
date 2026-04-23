@@ -2,340 +2,373 @@
 
 **Measuring Mechanistic Non-Identifiability in Machine Learning Models**
 
-EvoXplain is a framework for detecting and quantifying *mechanistic multiplicity* — the phenomenon where machine learning models achieve similar predictive performance while using fundamentally different explanation mechanisms. This has critical implications for AI safety, regulatory compliance, and the trustworthiness of model explanations.
+EvoXplain is a framework for detecting and quantifying *mechanistic multiplicity* — the phenomenon where machine learning models achieve similar predictive performance while relying on fundamentally different explanation mechanisms. This has direct implications for AI safety, regulatory compliance (e.g., the EU AI Act), and the trustworthiness of post-hoc model explanations in high-stakes domains such as genomics, healthcare, and criminal justice.
 
-> **Key Finding:** Models achieving 97%+ accuracy can exhibit completely unstable feature attributions across training runs. Predictive stability ≠ mechanistic stability.
+> **Key finding.** Models achieving ≥98% test accuracy can exhibit completely unstable feature attributions across training runs. Predictive stability is *not* mechanistic stability. On TCGA pan-cancer RNA-seq, we observe a **~39× decoupling ratio** between accuracy variation and attribution-cosine variation within a single pipeline.
+
+---
 
 ## Paper
 
 This repository accompanies the preprint:
 
-> **EvoXplain: When Machine Learning Models Agree on Predictions but Disagree on Why — Measuring Mechanistic Multiplicity Across Training Runs**  
-> arXiv:2512.22240
+> **EvoXplain: When Machine Learning Models Agree on Predictions but Disagree on Why — Measuring Mechanistic Multiplicity Across Training Runs**
+> arXiv:2512.22240 (December 2025)
+
+---
+
+## What's new (2026)
+
+- **TCGA pan-cancer benchmark.** End-to-end pipeline for 11,060 samples × 1,000 top-variance genes (tumour-vs-normal) with a Xena-format adapter.
+- **TCGA-BRCA subtype benchmark.** Luminal-vs-Basal loader for intrinsic molecular subtype analysis.
+- **Multi-lens attributions.** SHAP, LIME, Integrated Gradients, and Gini can now be computed in a single pass by passing a comma-separated `--attribution` list.
+- **Cross-pipeline coverage.** Logistic Regression (fixed-C, C-grid, ElasticNet grid), Random Forest, XGBoost, DNN, and SVM are all first-class citizens.
+- **Boundary-set methodology.** Attributions are computed on a decision-boundary subset of the held-out test set (default: probability band 0.45–0.55, k=200) to sharpen multiplicity signals.
+- **Cross-split stability mode.** Hungarian-matched centroid cosine similarity across splits, per-lens, for detecting stable vs data-driven basins.
+- **9-block falsification battery.** A consolidated adversarial test suite that rules out stochastic noise, sampling variance, background-set artefacts, and model instability as alternative explanations for observed multiplicity.
+
+---
 
 ## Overview
 
-EvoXplain works by:
+EvoXplain operates in five conceptual steps:
 
-1. Training many instances of the same model architecture on the same data (with different random seeds or hyperparameters)
-2. Computing SHAP-based feature importance vectors for each model
-3. Clustering these explanation vectors to identify distinct "mechanistic basins"
-4. Quantifying mechanistic diversity using normalized entropy and silhouette scores
+1. **Train a large ensemble** of the same model class on the same train/test split, varying a hyperparameter or random seed axis (a *pipeline*).
+2. **Compute attribution vectors** on a boundary subset of the test set using one or more *lenses* (SHAP, LIME, IG, Gini).
+3. **Cluster the L2-normalised attribution vectors** *within a split* to identify distinct mechanistic basins.
+4. **Quantify mechanistic diversity** using silhouette score, normalised Shannon entropy, and pairwise centroid cosine similarity.
+5. **Falsify** the finding against a battery of null hypotheses (randomness, sampling noise, background-set artefacts, model instability) before claiming genuine multiplicity.
 
-The framework reveals that seemingly equivalent models can rely on entirely different features to make predictions — a finding with implications for explainable AI and regulatory frameworks like the EU AI Act.
+### Pipelines vs. lenses — an important distinction
+
+The *pipeline* is the combination of **(data split) + (model class) + (hyperparameters)**. Mechanistic multiplicity is a property of the pipeline. Attribution methods are **post-hoc lenses**: they do not cause, suppress, or generate multiplicity — they only *resolve* (or fail to resolve) multiplicity that already exists in the pipeline. Different lenses may reveal different facets of the same underlying non-identifiability.
+
+---
 
 ## Installation
 
-### Requirements
+### Core requirements
 
 ```bash
-pip install numpy pandas scikit-learn shap matplotlib scipy
+pip install numpy pandas scikit-learn scipy matplotlib
+pip install shap lime      # attribution lenses
+pip install torch          # required for DNN and IG
+pip install xgboost        # required for XGB pipeline
 ```
 
-### Clone the Repository
+### Clone the repository
 
 ```bash
 git clone https://github.com/bensmailchama-boop/EvoXplain.git
 cd EvoXplain
 ```
 
-## Directory Structure
+---
 
-```
-EvoXplain/
-├── evoxplain_core_engine.py           # Main engine: training, SHAP, aggregation
-├── evoxplain_disagreement_within_split.py  # Within-split disagreement analysis
-├── evoxplain_visualize_logreg_clustered.py # Visualization for LogReg experiments
-├── evoxplain_visualize_rf_clustered.py     # Visualization for Random Forest experiments
-├── evoxplain_per_split_summary.py          # Generate per-split summary CSV
-├── data/
-│   └── compas-scores-two-years.csv    # COMPAS dataset (download separately)
-├── results/                           # Output directory for experiments
-│   ├── bc_lr_shap_variedC/           # Breast Cancer LogReg varied C results
-│   ├── bc_lr_shap_fixedC_C1.0/       # Breast Cancer LogReg fixed C control
-│   ├── compas_lr_shap_variedC/       # COMPAS LogReg varied C results
-│   └── ...
-├── hpc_scripts/                       # SLURM batch scripts (optional)
-│   ├── batches_BC_LogReg_variedC.sh
-│   ├── aggregate_BC_LogReg_variedC.sh
-│   └── ...
-└── logs/                              # Log files from HPC runs
-```
+## Supported pipelines
 
-## Quick Start
+| Component | Options |
+|-----------|---------|
+| **Models** (`--model`) | `lr`, `rf`, `xgb`, `dnn`, `svm` |
+| **LR penalty** (`--lr_penalty`) | `l2`, `l1`, `elasticnet`, `none` |
+| **LR C mode** (`--lr_C_mode`) | `fixed`, `grid` (log-uniform over `--lr_C_min`…`--lr_C_max`) |
+| **LR ElasticNet l1_ratio** (`--lr_l1_ratio_mode`) | `fixed`, `grid` (0→1 across runs) |
+| **Attribution lenses** (`--attribution`) | `shap`, `lime`, `ig`, `gini` — comma-separated for multi-lens |
+| **Boundary set** (`--boundary_method`) | `prob_band` (default, 0.45–0.55), `full` |
 
-### Local Execution (Small Scale)
+## Supported datasets
 
-For testing or small-scale experiments on a local machine:
+| Name (`--dataset`) | Task | Notes |
+|--------------------|------|-------|
+| `breast_cancer` | Benign vs malignant | Sklearn built-in |
+| `compas` | Recidivism prediction | Requires `data/compas-scores-two-years.csv` |
+| `adult` | Income >50K | UCI Adult |
+| `german_credit` | Credit risk | OpenML credit-g |
+| `acs_income` | ACS income (US) | via `folktables`, configurable by state/year |
+| `cmnist` | Colored MNIST | Spurious-correlation benchmark |
+| `mimic` | MIMIC-CXR pneumonia | Requires preprocessed `.npz` |
+| `synthetic_single` | Controlled single-mechanism | Ground-truth k=1 |
+| `synthetic_two` | Controlled two-mechanism | Ground-truth k=2 |
+| `synthetic_two_mixture` | Two-mechanism mixture | Ground-truth k=2 with overlap |
+| `tcga` | TCGA tumour vs normal | 11,060 samples × 1,000 genes (Xena adapter) |
+| `tcga_brca_luminal_vs_basal` | BRCA intrinsic subtypes | Luminal A/B vs Basal |
+
+---
+
+## Quick start
+
+### Local execution — single chunk
 
 ```bash
-# 1. Run a single chunk of experiments (e.g., 20 runs)
 python evoxplain_core_engine.py \
     --dataset breast_cancer \
-    --model logreg \
+    --model lr \
     --mode chunk \
     --split_seed 100 \
     --n_runs 100 \
     --chunk_id 0 \
     --chunk_size 20 \
-    --c_mode varied \
-    --c_min 0.01 \
-    --c_max 100 \
+    --attribution shap,lime \
+    --lr_C_mode grid --lr_C_min 0.01 --lr_C_max 100 \
     --output_dir results/test_run
+```
 
-# 2. Aggregate chunks into a single split file
+### Aggregate a split (per-lens clustering)
+
+```bash
 python evoxplain_core_engine.py \
     --dataset breast_cancer \
-    --model logreg \
+    --model lr \
     --mode aggregate_split \
     --split_seed 100 \
+    --attribution shap,lime \
     --output_dir results/test_run
-
-# 3. Visualize results
-python evoxplain_visualize_logreg_clustered.py \
-    --input_dir results/test_run \
-    --overlay log_C \
-    --space normed
 ```
 
-### HPC Execution (Full Scale)
-
-For reproducing paper results with 10,000 runs per dataset (or 5000 runs for RF):
+### Cross-split stability (Hungarian-matched)
 
 ```bash
-# Submit array job for parallel chunk execution
-sbatch hpc_scripts/batches_BC_LogReg_variedC.sh
-
-# After all chunks complete, run aggregation
-sbatch hpc_scripts/aggregate_BC_LogReg_variedC.sh
-```
-
-## Core Components
-
-### evoxplain_core_engine.py
-
-The main engine supporting three modes:
-
-| Mode | Description |
-|------|-------------|
-| `chunk` | Train models and compute SHAP importance for a subset of runs |
-| `aggregate_split` | Combine chunks into a single split NPZ file |
-| `aggregate_universal` | Combine multiple splits, cluster, and compute disagreements |
-
-**Key Arguments:**
-
-```
---dataset          Dataset name (breast_cancer, compas, adult)
---model            Model type (logreg, rf)
---mode             Execution mode (chunk, aggregate_split, aggregate_universal)
---split_seed       Random seed for train/test split
---n_runs           Total number of runs per split
---chunk_id         Chunk index for parallel execution
---chunk_size       Number of runs per chunk
---c_mode           Regularization mode: 'fixed' or 'varied'
---C                Fixed C value (when c_mode=fixed)
---c_min, --c_max   C range for log-uniform sampling (when c_mode=varied)
---output_dir       Output directory for results
---disagreement     Compute disagreement report (with aggregate_universal)
-```
-
-### evoxplain_disagreement_within_split.py
-
-Computes disagreement analysis **within** each split — the methodologically correct approach since it compares models trained on the same train/test split.
-
-```bash
-python evoxplain_disagreement_within_split.py \
-    --input_dir results/bc_lr_shap_variedC \
+python evoxplain_core_engine.py \
     --dataset breast_cancer \
-    --model logreg
+    --model lr \
+    --mode cross_split_stability \
+    --split_seeds 100,101,102,103,104 \
+    --attribution_lens shap \
+    --output_dir results/test_run
 ```
 
-### Visualization Scripts
+### HPC execution
 
-Generate publication-quality figures:
+SLURM array job templates for the full 100×100 and 10,000-run designs are provided in `hpc_scripts/`. Update `#SBATCH --chdir=` and `#SBATCH --partition=` for your cluster before use. Note: the example scripts assume a **tcsh** shell — adjust for bash if your environment differs.
 
-```bash
-# LogReg experiments
-python evoxplain_visualize_logreg_clustered.py \
-    --input_dir results/bc_lr_shap_variedC \
-    --overlay log_C \
-    --space normed \
-    --universal \
-    --param_grid
+---
 
-# Random Forest experiments  
-python evoxplain_visualize_rf_clustered.py \
-    --input_dir results/bc_rf_shap_varied \
-    --overlay n_estimators \
-    --space normed \
-    --param_grid
+## Core components
+
+### `evoxplain_core_engine.py`
+
+Single-file engine covering the full experiment lifecycle.
+
+| Mode (`--mode`) | Purpose |
+|-----------------|---------|
+| `chunk` | Train models and compute attributions for a subset of runs within a split |
+| `aggregate_split` | Combine chunks into a per-split `aggregate_split{seed}.npz` and cluster per-lens |
+| `report` | Emit a per-split summary report (k\*, entropy, silhouette, centroid cosine) |
+| `analyze_subbasins` | Sub-structure analysis within a target basin |
+| `cross_split_stability` | Match centroids across splits via the Hungarian algorithm; per-lens |
+| `load_only` | Sanity-check dataset loading (no training) |
+
+**Key arguments:**
+
+```
+--dataset               Dataset name (see table above)
+--model                 Model class (lr, rf, xgb, dnn, svm)
+--attribution           Comma-separated list of lenses (shap, lime, ig, gini)
+--attribution_lens      Lens to use for cross_split_stability when multi-lens
+--split_seed            Random seed for a single train/test split
+--split_seeds           Comma-separated seeds (cross_split_stability)
+--n_runs / --chunk_id / --chunk_size   Parallel chunking controls
+--lr_C / --lr_C_mode    Fixed or log-uniform grid over C
+--lr_penalty            l1 | l2 | elasticnet | none
+--lr_l1_ratio_mode      fixed | grid (for ElasticNet)
+--boundary_method       prob_band (default) | full
+--boundary_prob_low / --boundary_prob_high / --boundary_k
+--shap_bg_mode          per_split | fixed
+--cosine_collapse       Collapse-to-k=1 threshold on 1−cos_min (default 0.99)
+--tcga_gz_path          Path to TCGA Xena-format expression matrix
+--tcga_top_n            Number of top-variance genes (default 1000)
+--tcga_subtype_path     Path to BRCA subtype annotations
 ```
 
-## Datasets
-
-### Breast Cancer Wisconsin (Built-in)
-
-Loaded automatically via scikit-learn. Features are standardized.
-
-### COMPAS
-
-Download the COMPAS dataset and place it in `data/`:
-
-```bash
-mkdir -p data
-wget -O data/compas-scores-two-years.csv \
-    https://raw.githubusercontent.com/propublica/compas-analysis/master/compas-scores-two-years.csv
-```
-
-### Adult Income
-
-Download and place in `data/adult.csv`.
-
-## Output Files
-
-### Per-Chunk (during `chunk` mode)
-
-- `importance_split{seed}_chunk{id}.npy` — SHAP importance vectors
-- `meta_split{seed}_chunk{id}.json` — Metadata (accuracy, C values, etc.)
-
-### Per-Split (after `aggregate_split`)
-
-- `aggregate_split{seed}.npz` — Combined importance, accuracy, hyperparameters
-
-### Universal (after `aggregate_universal`)
-
-- `universal_importance.npy` — All importance vectors
-- `universal_normed_importance.npy` — L2-normalized vectors
-- `universal_labels.npy` — Cluster assignments
-- `universal_summary.json` — Clustering metrics (k, entropy, silhouette)
-- `disagreement_report_split{seed}.csv` — Instance-level disagreements
+---
 
 ## Methodology
 
-### k=1 Null Hypothesis
+### k=1 as the null hypothesis
 
-EvoXplain treats **k=1 as the null hypothesis** when discovering mechanistic basins. This ensures we *discover* whether multiple basins exist rather than *assume* they do.
+EvoXplain treats **k=1 as the null hypothesis** when discovering mechanistic basins. We *discover* whether multiple basins exist rather than *assume* they do.
 
-Forcing k≥2 (as many clustering approaches do by default) would be methodologically incorrect for mechanistic analysis:
+Forcing k≥2 (as many clustering approaches do by default) would be a category error here:
 
-- **Convex models** (e.g., Logistic Regression with fixed C) have a unique global optimum — all runs converge to identical explanations
-- Forcing k≥2 would artificially split a single basin, inflating entropy estimates
+- **Convex pipelines** (e.g., LR with fixed C) have a unique global optimum and must collapse to k=1.
+- Forcing k≥2 would artificially split a single basin within a same-data-split experiment and inflate entropy.
 
-#### Silhouette Threshold
+### Silhouette threshold
 
-We accept k>1 only if the silhouette score exceeds a threshold (default: 0.25):
+We accept k>1 only if the silhouette score exceeds a threshold (default: 0.25).
 
 | Silhouette | Interpretation | Decision |
 |------------|----------------|----------|
 | < 0.25 | No substantial cluster structure | Accept k=1 |
-| ≥ 0.25 | Evidence of multiple clusters | Accept best k |
+| ≥ 0.25 | Evidence of multiple basins | Accept best k |
 
-The threshold of 0.25 follows standard silhouette interpretation where values below 0.25 indicate no meaningful structure.
+### Collapse guards
 
-#### Algorithm
+Two additional guards prevent spurious k>1:
+
+1. **Cosine collapse guard.** If `1 − cosine_min < cosine_collapse` (default 0.99), return k=1.
+2. **Centroid cosine check.** If any pair of candidate centroids has cosine similarity > 0.99, collapse to k=1.
+
+### Clustering algorithm
 
 ```
-1. If all explanation vectors are identical → return k=1
-2. If variance is negligible (< 1e-10) → return k=1  
+1. If all attribution vectors are identical → return k=1
+2. If variance is negligible (< 1e-10) → return k=1
 3. For k = 2 to k_max:
-   - Fit K-means, compute silhouette score
-   - Track best k by silhouette
-4. If best_silhouette < 0.25 → return k=1 (null hypothesis)
-5. Otherwise → return best_k
+     Fit K-means; compute silhouette (euclidean or cosine)
+     Track best k by silhouette
+4. If best_silhouette < 0.25 → return k=1
+5. If any centroid pair has cosine > 0.99 → return k=1
+6. Otherwise → return best_k
 ```
 
-#### Validation
+### Boundary-set methodology
 
-The fixed-C control experiment validates this approach: Logistic Regression with C=1.0 correctly returns k=1 for all splits, with `k1_reason: "degenerate_identical_vectors"`.
+Attributions are computed on a subset of the test set that sits near the decision boundary (default: probability band 0.45–0.55, up to k=200 points). This sharpens the multiplicity signal because bulk regions of feature space tend to be assigned the same label by all basins — the disagreement lives at the margin. The boundary set is computed from `X_test` only and cached per split for reproducibility.
 
-### Clustering
+### Within-split vs cross-split
 
-1. **Normalization:** Center by mean, L2-normalize each explanation vector
-2. **K-selection:** Silhouette score optimization over k ∈ [2, k_max], with k=1 null hypothesis
-3. **Entropy:** Normalized Shannon entropy over cluster membership
+> **Cluster ONLY within a split** (same causal context). Clustering across splits is a category error — each split is an independent causal context. Cross-split *comparison* (via `cross_split_stability` mode) uses Hungarian-matched centroid cosine similarity, not joint clustering.
 
-### Key Metrics
+### Metrics
 
 | Metric | Interpretation |
 |--------|----------------|
-| `best_k` | Number of distinct mechanistic basins |
+| `best_k` | Number of mechanistic basins (per lens) |
 | `entropy_norm` | Uniformity of basin populations (1.0 = perfectly uniform) |
 | `silhouette` | Cluster separation quality |
-| `disagreement` | Max probability difference between basin representatives |
+| `centroid_cosine` | Pairwise similarity between basin representatives |
+| `pairwise_avg_matched_cosine` | Cross-split basin stability (Hungarian-matched) |
 
-### Important Constraint
+---
 
-> **Only cluster WITHIN a split.** Clustering across splits is a category error — each split represents an independent causal context.
+## Headline empirical results
 
-## Reproducing Paper Results
+### Breast Cancer Wisconsin (LR, SHAP + LIME, C-grid)
 
-### Breast Cancer + LogReg (Varied C)
+- 100 splits × 100 runs; C log-uniform over [0.01, 100].
+- SHAP k\*=2 in 84/100 splits; LIME k\*=2 in 98/100 splits; label agreement between the two lenses 97.3%.
+- Multiplicity is intrinsic to the (data-split + LR + C-grid) pipeline — both lenses resolve it.
+
+### TCGA pan-cancer tumour vs normal (cross-pipeline)
+
+Four model classes, 100 splits × 100 runs, dual-lens SHAP + LIME.
+
+| Pipeline | Test accuracy | Multiplicity signature |
+|----------|---------------|------------------------|
+| XGBoost | 0.9878 | k\*=1 (single tissue-of-origin story; SHAP cosine ~0.976) |
+| DNN | 0.9873 | k\*=2 SHAP (sign-flip), k\*=2 LIME (weight-fork) |
+| LR C-grid | 0.9832 | **k\*=3 SHAP / k\*=2 LIME**, anti-aligned basins |
+| ElasticNet grid | 0.9763 | k\*=2 LIME (clean); SHAP fragments under C-grid over-resolution |
+
+For LR C-grid, basin assignment is monotonically driven by the regularisation strength. Pathway enrichment (g:Profiler) of the top genes in each basin confirms biologically distinct mechanisms:
+
+- **Basin 0** (high C, ~100% split recurrence) — **extracellular region / matrix** terms dominant.
+- **Basin 1** (low C, 35–40% recurrence) — **PPAR signalling / lipid metabolism** dominant.
+
+The decoupling ratio between test-accuracy variation and attribution-cosine variation within the LR C-grid pipeline is **~41×**.
+
+### TCGA-BRCA Luminal vs Basal
+
+100 splits × 100 runs, LR C-grid, SHAP + LIME:
+
+- k\*=2 in 94/95 usable splits.
+- Inter-basin cosine **+0.85 SHAP / +0.81 LIME** — this is *geometric non-semantic multiplicity* (a sparsity fork, not a sign-flip).
+- AGR3, TFF1, DSCAM-AS1, SRARP recur as luminal markers across basins.
+
+---
+
+## Falsification battery
+
+A genuine finding of mechanistic multiplicity must survive adversarial falsification. EvoXplain ships a 9-block battery (consolidated from an earlier 12-test grid) that tests whether the observed k>1 could be explained away by any of the following null accounts:
+
+| Block | Null hypothesis under test |
+|-------|----------------------------|
+| 1 — Replay / seed / C decomposition | Multiplicity is due to stochastic seed variation, not to the hyperparameter axis |
+| 2 — Sampling noise | Multiplicity is due to small-sample boundary-set variance |
+| 3 — Background-set artefact | Multiplicity is an artefact of the SHAP background set |
+| 4 — Model instability | Multiplicity reflects unstable training, not genuine mechanism choice |
+| 5 — LOO-AUC sensitivity | Top-basin features are noise (should fail to transfer) |
+| 6 — Cross-split cosine | Basins are data-split-specific rather than structural |
+| 7 — Top-k patient stability | Instance-level attributions are noise-driven |
+| 8 — Anti-alignment check | Worst-pair cosine reveals true sign-reversal structure |
+| 9 — Null / permuted labels | Multiplicity persists on meaningless labels (a failure of the pipeline, not a finding) |
+
+All nine blocks were killed on the Breast Cancer benchmark (full numbers in the preprint). A hardened rerun on TCGA pan-cancer is currently underway.
+
+---
+
+## Output files
+
+### Per-chunk (`chunk` mode)
+
+- `chunk_{id}.npz` — per-lens attribution vectors (`expvec_{lens}`), test accuracies, run IDs, hyperparameter trajectories (`run_C_values`, `run_l1_values`).
+
+### Per-split (`aggregate_split` mode)
+
+- `aggregate_split{seed}.npz` — combined attribution vectors, per-lens cluster labels, centroids (`centroids_normed_{lens}`), k\* (`k_star_{lens}`), silhouette, entropy.
+
+### Cross-split (`cross_split_stability` mode)
+
+- `cross_split_stability.json` — per-lens Hungarian-matched centroid cosine similarity across splits.
+
+---
+
+## Reproducing paper results
+
+### Breast Cancer + LR (C-grid, dual-lens)
 
 ```bash
-# 1. Run all chunks (500 array jobs × 20 runs = 10,000 runs)
-sbatch hpc_scripts/batches_BC_LogReg_variedC.sh
+# Run chunks in parallel across the SLURM array
+sbatch hpc_scripts/batches_BC_LR_Cgrid.sh
 
-# 2. Aggregate and cluster
-sbatch hpc_scripts/aggregate_BC_LogReg_variedC.sh
-
-# 3. Generate summary
-python evoxplain_per_split_summary.py --input_dir results/bc_lr_shap_variedC
-
-# 4. Visualize
-python evoxplain_visualize_logreg_clustered.py \
-    --input_dir results/bc_lr_shap_variedC \
-    --universal --param_grid
+# Aggregate per split
+sbatch hpc_scripts/aggregate_BC_LR_Cgrid.sh
 ```
 
-### Fixed C Control Experiment
-
-To verify that mechanistic multiplicity arises from hyperparameter variation:
+### TCGA pan-cancer + LR (C-grid, dual-lens)
 
 ```bash
-sbatch hpc_scripts/batches_BC_LogReg_FixedC.sh
-sbatch hpc_scripts/aggregate_BC_LogReg_fixedC.sh
+sbatch hpc_scripts/batches_TCGA_LR_Cgrid.sh
+sbatch hpc_scripts/aggregate_TCGA_LR_Cgrid.sh
 ```
 
-Expected result: All splits show k=1 (explanations collapse to single basin).
-
-## HPC Configuration
-
-The provided SLURM scripts are configured for a specific HPC environment. Before use, modify:
-
-1. **Working directory:** Change `#SBATCH --chdir=` to your path
-2. **Partition:** Adjust `#SBATCH --partition=` for your cluster
-3. **Python version:** Update `python3.9` if needed
-
-Example modification:
+### Fixed-C control (should return k=1 everywhere)
 
 ```bash
-# In batches_BC_LogReg_variedC.sh, change:
-#SBATCH --chdir=/home2/chamabens/HPC_EvoXplain
-# To:
-#SBATCH --chdir=/your/path/to/EvoXplain
+sbatch hpc_scripts/batches_BC_LR_FixedC.sh
 ```
+
+Expected result: all splits return k=1 (explanations collapse to a single basin), validating the k=1 null hypothesis.
+
+---
 
 ## Citation
 
 If you use EvoXplain in your research, please cite:
 
 ```bibtex
-@article{evoxplain2025,
-  title={EvoXplain: When Machine Learning Models Agree on Predictions but Disagree on Why -- Measuring Mechanistic Multiplicity Across Training Runs},
-  author={[Chama Bensmail]},
-  journal={arXiv preprint arXiv:2512.22240},
-  year={2025}
+@article{bensmail2025evoxplain,
+  title   = {EvoXplain: When Machine Learning Models Agree on Predictions but
+             Disagree on Why -- Measuring Mechanistic Multiplicity Across Training Runs},
+  author  = {Bensmail, Chama},
+  journal = {arXiv preprint arXiv:2512.22240},
+  year    = {2025}
 }
 ```
 
+---
+
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+EvoXplain is released under the **GNU Affero General Public License v3.0 (AGPL-3.0)** — free for research, academic, teaching, and open-source use. See `LICENSE` for the full text.
 
-## Patent Notice
+## Patent notice
 
-**EvoXplain is the subject of a UK provisional patent application.** The methodology for detecting and quantifying mechanistic non-identifiability in machine learning models is patent-pending. Commercial use may require a separate license agreement. For licensing inquiries, please contact the authors.
+EvoXplain is the subject of a **UK provisional patent application** covering the methodology for detecting and quantifying mechanistic non-identifiability in machine learning models.
+
+For commercial use that is incompatible with AGPL-3.0, or for patent licensing enquiries, please contact the author: **bensmail.chama@gmail.com**.
 
 ## Acknowledgments
 
-This work was conducted by Chama Bensmail, using University of Hertfordshire HPC resources.
+This work was conducted by Chama Bensmail (Omics Data Solutions Ltd, Sheffield) using University of Hertfordshire HPC resources, with support from Prof. Volker Steuber and Dr Epaminondas Kapetanios (Bio-computation group and H-XAI Lab, University of Hertfordshire).
