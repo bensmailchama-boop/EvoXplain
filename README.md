@@ -294,7 +294,7 @@ A genuine finding of mechanistic multiplicity must survive adversarial falsifica
 | 8 — Anti-alignment check | Worst-pair cosine reveals true sign-reversal structure |
 | 9 — Null / permuted labels | Multiplicity persists on meaningless labels (a failure of the pipeline, not a finding) |
 
-All nine blocks were killed on the Breast Cancer benchmark (full numbers in the preprint). A hardened rerun on TCGA pan-cancer is currently underway.
+All nine blocks were killed on the Breast Cancer benchmark as well as on TCGA pan-cancer.
 
 ---
 
