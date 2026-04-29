@@ -254,12 +254,12 @@ Attributions are computed on a subset of the test set that sits near the decisio
 
 Four model classes, 100 splits × 100 runs, dual-lens SHAP + LIME.
 
-| Pipeline | Test accuracy | Multiplicity signature |
-|----------|---------------|------------------------|
-| XGBoost | 0.9878 | k\*=1 (single tissue-of-origin story; SHAP cosine ~0.976) |
-| DNN | 0.9873 | k\*=2 SHAP (sign-flip), k\*=2 LIME (weight-fork) |
-| LR C-grid | 0.9832 | **k\*=3 SHAP / k\*=2 LIME**, anti-aligned basins |
-| ElasticNet grid | 0.9763 | k\*=2 LIME (clean); SHAP fragments under C-grid over-resolution |
+| Pipeline | Test accuracy | std | Multiplicity signature |
+|----------|---------------|-----|------------------------|
+| XGBoost | 0.9878 | 0.0019 | k\*=1 (single tissue-of-origin story; SHAP cosine ~0.976) |
+| DNN | 0.9873 | 0.0023 | k\*=2 SHAP (sign-flip), k\*=2 LIME (weight-fork) |
+| LR C-grid | 0.9832 | 0.0030 | **k\*=3 SHAP / k\*=2 LIME**, anti-aligned basins |
+
 
 For LR C-grid, basin assignment is monotonically driven by the regularisation strength. Pathway enrichment (g:Profiler) of the top genes in each basin confirms biologically distinct mechanisms:
 
