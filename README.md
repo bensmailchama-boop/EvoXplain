@@ -260,6 +260,7 @@ Four model classes, 100 splits × 100 runs, dual-lens SHAP + LIME.
 | DNN | 0.9873 | 0.0023 | k\*=2 SHAP (sign-flip), k\*=2 LIME (weight-fork) |
 | LR C-grid | 0.9832 | 0.0030 | **k\*=3 SHAP / k\*=2 LIME**, anti-aligned basins |
 
+**The top-performing models are effectively tied within variance — but they exhibit different explanation structures.**
 
 For LR C-grid, basin assignment is monotonically driven by the regularisation strength. Pathway enrichment (g:Profiler) of the top genes in each basin confirms biologically distinct mechanisms:
 
