@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-evoxplain_core_engine.py - Explanation Multiplicity Discovery Engine
-Includes support for: Adult Income, Breast Cancer (BC), COMPAS, Colored MNIST, MIMIC-CXR, German Credit, ACS Income,
-                       Synthetic Single Mechanism, Synthetic Two Mechanism,
+evoxplain_core_engine.py - EvoXplain Core Engine - www.evoxplain.com
+Includes support for: Adult, Breast Cancer (BC), COMPAS, Colored MNIST, MIMIC-CXR, German Credit, ACS Income,
+                       Synthetic Single Mechanism, Synthetic LR Ground-Truth K2 / K1 (basin-geometry validation),
                        TCGA Tumour vs Normal (via tcga_xena_adapter)
 Attributions: SHAP, Integrated Gradients (IG), Gini, LIME
 """
@@ -659,6 +659,67 @@ def load_dataset(dataset_name: str, drop_features=None, data_cache_dir=None, dat
         print(f"[Data] === TCGA BRCA loader complete ===\n")
 
         # Return — preprocessing already done; bypass global preprocessing block
+        return X, y, feature_names
+
+    # --- 13. SYNTH K2 (ground-truth k* = 2, two redundant pathways) ---
+    # Validation dataset for the bootstrap-and-cluster procedure.
+    # x0, x1 are near-identical noisy copies of a latent signal z; either
+    # alone is sufficient to predict y. Under L1 regularisation, the
+    # optimiser snaps to one corner or the other depending on bootstrap
+    # perturbation, producing two basins at simplex corners [1, 0, ...]
+    # and [0, 1, ...]. Pipeline must use L1 (e.g. --lr_penalty elasticnet
+    # --lr_l1_ratio 1.0 --lr_C 0.01) to expose the basin geometry; under
+    # pure L2 the optimiser averages weight across x0 and x1 and the
+    # multiplicity is hidden.
+    elif dataset_name.lower() in ("synth_k2", "synthetic_k2", "synth-k2",
+                                   "synthetic_groundtruth_k2"):
+        rng = np.random.RandomState(42)
+        n_samples, n_noise = 5000, 18
+        z = rng.normal(0, 1, size=n_samples)
+        X = np.zeros((n_samples, 2 + n_noise))
+        X[:, 0] = z + 0.005 * rng.normal(0, 1, size=n_samples)   # signal copy A
+        X[:, 1] = z + 0.005 * rng.normal(0, 1, size=n_samples)   # signal copy B
+        X[:, 2:] = rng.normal(0, 1, size=(n_samples, n_noise))    # noise features
+        y = (z + 0.3 * rng.normal(0, 1, size=n_samples) > 0).astype(int)
+        feature_names = ["signal_copy_A", "signal_copy_B"] + \
+                        [f"noise_{i}" for i in range(n_noise)]
+        print(f"[Data] === SYNTH-K2 (ground-truth k* = 2) ===")
+        print(f"[Data] X shape: {X.shape}  |  y shape: {y.shape}")
+        print(f"[Data] Two near-identical proxies of latent z (noise=0.005), "
+              f"{n_noise} noise features.")
+        print(f"[Data] Either signal_copy_A or signal_copy_B alone is sufficient.")
+        print(f"[Data] Recommended pipeline: --model lr --lr_penalty elasticnet "
+              f"--lr_l1_ratio 1.0 --lr_C 0.01 (forces L1 corner solutions).")
+        unique, counts = np.unique(y, return_counts=True)
+        for u, c in zip(unique, counts):
+            print(f"[Data] class {u}: {c:,} samples ({100.0*c/len(y):.1f}%)")
+        return X, y, feature_names
+
+    # --- 14. SYNTH K1 (ground-truth k* = 1, single mechanism, no redundancy) ---
+    # Validation dataset complementing SYNTH-K2. x0 and x1 are independent
+    # and BOTH required for accuracy; no redundant pathway exists. Every
+    # bootstrap lands on the same {x0, x1} support with attribution
+    # vectors clustered tightly at [~0.5, ~0.5, 0, ...]. The engine should
+    # report k* = 1 under the same parsimony rule that yields k* = 2 on
+    # SYNTH-K2.
+    elif dataset_name.lower() in ("synth_k1", "synthetic_k1", "synth-k1",
+                                   "synthetic_groundtruth_k1"):
+        rng = np.random.RandomState(42)
+        n_samples, n_noise = 5000, 18
+        X = rng.normal(0, 1, size=(n_samples, 2 + n_noise))
+        z = X[:, 0] + X[:, 1]    # both signals required
+        y = (z + 0.3 * rng.normal(0, 1, size=n_samples) > 0).astype(int)
+        feature_names = ["signal_required_A", "signal_required_B"] + \
+                        [f"noise_{i}" for i in range(n_noise)]
+        print(f"[Data] === SYNTH-K1 (ground-truth k* = 1) ===")
+        print(f"[Data] X shape: {X.shape}  |  y shape: {y.shape}")
+        print(f"[Data] Two independent features, both required for prediction; "
+              f"{n_noise} noise features.")
+        print(f"[Data] No redundant pathway — single basin expected under any "
+              f"reasonable pipeline.")
+        unique, counts = np.unique(y, return_counts=True)
+        for u, c in zip(unique, counts):
+            print(f"[Data] class {u}: {c:,} samples ({100.0*c/len(y):.1f}%)")
         return X, y, feature_names
 
     else:
