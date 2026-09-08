@@ -22,7 +22,7 @@ Nothing large is stored in this repository.
 | Lewis input matrix (`gene_lewis_exact.pickle`) | GSE62944 `GSM1536837_06_01_15_TCGA_24.tumor_Rsubread_TPM.txt.gz`, columns matched on 16-char TCGA barcode to `lewis_labels_915.tsv` (915 samples, 199 resistant); built by `build_lewis_exact.py` | — |
 | Lewis independent reconstruction (`gene_all.pickle`) | Xena/TOIL log2(RSEM-TPM+0.001), 885 samples, 40,950 genes, best-mean ENSG per symbol, HGNC 2026 freeze | — |
 
-Archived artifacts: **[Zenodo DOI — to be added]**
+Archived artifacts: local at `~/evoxplain/archive/` (tcga_lr_cgrid, lewis_refits), each with MANIFEST.sha256. Public deposit not yet arranged.
 
 The Xena matrix is a public download and is not redistributed here. Record its
 checksum when you fetch it; the effect sizes in `tissue_composition_check.py`
