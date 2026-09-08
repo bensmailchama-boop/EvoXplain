@@ -4,8 +4,7 @@ Limitations of the **results**. For limitations of the code, see the
 "Known issues" section of the README.
 
 Most of what follows was found by checking our own claims. Several entries
-correct earlier versions of this analysis, and the corrections are recorded
-rather than quietly absorbed.
+correct earlier versions of this analysis, and the corrections are recorded.
 
 ---
 
@@ -180,9 +179,4 @@ at publication-realistic sizes is the finding.
 
 ## What averaging does and does not do
 
-Across both datasets, aggregation **subtracts and displaces**; it does not
-fabricate. Every term in every simulated practitioner's report traces back to a
-real regime term, and every term in the Lewis averaged panel appears in at
-least one individual model. The concern that averaging might manufacture a
-mechanism no accurate model supports was tested and not observed. Whether it
-can occur under other conditions is unknown.
+Aggregation subtracts and displaces. It was not observed to fabricate — but this was tested only at the level of ontology terms. In the TCGA practitioner simulation, every term in every aggregated report traces back to a term present in at least one individual regime; no term appeared that no model supported. This does not extend to genes. The Lewis averaged panel's genes appear in a mean of 7.3 of 20 refits, and 15 of its 50 genes appear in 5 or fewer — so the published-style panel does contain genes that most equally accurate models do not select, assembled by summation rather than by any model's reasoning. The corresponding term-level check on the Lewis panel is uninformative, because that panel yields no significant terms at all against the measured-gene background. Whether aggregation can manufacture a term that no accurate model supports remains untested in the dispersed regime, and unknown in general.
